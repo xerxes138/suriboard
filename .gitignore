@@ -1,0 +1,20 @@
+# Laufzeitdaten: Datenbank (inkl. Passwort-Hashes), settings.json, Sicherungen,
+# heruntergeladene Feeds, TLS-Schluessel, Erst-Passwort
+data/
+
+# Lokale Konfiguration (Vorlage: config.example.json)
+config.json
+
+# Exporte der Nutzerdaten (koennen Passwort-Hashes enthalten)
+suricata-dashboard-*.json
+userdata-*.json
+
+# Python
+__pycache__/
+*.pyc
+
+# Editor/OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
