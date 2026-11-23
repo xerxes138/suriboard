@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Anmelden – Suricata Dashboard</title>
+  <link rel="stylesheet" href="style.css?v=__VERSION__">
+  <script>
+    try { var t = localStorage.getItem("theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+  </script>
+</head>
+<body class="login-page">
+  <main class="login-wrap">
+    <form class="card login-card" id="f" autocomplete="on">
+      <div class="brand"><i class="dot"></i>Suricata IPS</div>
+      <h1>Anmelden</h1>
+      <div class="field">
+        <label for="u">Benutzername</label>
+        <input type="text" id="u" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus>
+      </div>
+      <div class="field">
+        <label for="p">Passwort</label>
+        <input type="password" id="p" name="password" autocomplete="current-password" required>
+      </div>
+      <label class="remember"><input type="checkbox" id="r"> Angemeldet bleiben (30 Tage)</label>
+      <div class="err" id="e" hidden></div>
+      <button class="btn primary login-btn" id="b" type="submit">Anmelden</button>
+      <p class="login-hint" id="h" hidden>
+        Die Verbindung ist nicht verschlüsselt. Passwörter lassen sich im Netz mitlesen –
+        aktiviere HTTPS unter Einstellungen.
+      </p>
+    </form>
+  </main>
+  <script>
+    (function () {
+      var f = document.getElementById("f"), e = document.getElementById("e"), b = document.getElementById("b");
+      if (location.protocol !== "https:") document.getElementById("h").hidden = false;
+      var timer = null;
+      function show(msg) { e.textContent = msg; e.hidden = !msg; }
+      function lock(sec) {
+        b.disabled = true;
+        clearInterval(timer);
+        timer = setInterval(function () {
+          sec -= 1;
+          if (sec <= 0) { clearInterval(timer); b.disabled = false; show(""); return; }
+          show("Zu viele Fehlversuche. Bitte in " + sec + " s erneut versuchen.");
+        }, 1000);
+      }
+      f.addEventListener("submit", function (ev) {
+        ev.preventDefault();
+        b.disabled = true; show("");
+        fetch("/api/login", {
+          method: "POST", headers: { "Content-Type": "application/json" }, credentials: "same-origin",
+          body: JSON.stringify({
+            username: document.getElementById("u").value,
+            password: document.getElementById("p").value,
+            remember: document.getElementById("r").checked
+          })
+        }).then(function (r) {
+          return r.json().catch(function () { return {}; }).then(function (j) {
+            if (r.ok) { location.replace("/"); return; }
+            show(j.error || "Anmeldung fehlgeschlagen (" + r.status + ")");
+            document.getElementById("p").value = "";
+            document.getElementById("p").focus();
+            if (j.retry_after) lock(j.retry_after); else b.disabled = false;
+          });
+        }).catch(function () { show("Server nicht erreichbar."); b.disabled = false; });
+      });
+    })();
+  </script>
+</body>
+</html>

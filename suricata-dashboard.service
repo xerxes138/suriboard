@@ -1,0 +1,20 @@
+[Unit]
+Description=Suricata Dashboard
+After=network-online.target suricata.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Pfad anpassen, falls das Projekt woanders liegt
+WorkingDirectory=/opt/suricata-dashboard
+ExecStart=/usr/bin/python3 /opt/suricata-dashboard/backend/server.py --config /opt/suricata-dashboard/config.json
+Restart=on-failure
+RestartSec=5
+# Leserechte auf /var/log/suricata: entweder als root laufen lassen (Standard hier)
+# oder einen Benutzer mit Gruppe "suricata"/"adm" eintragen:
+# User=pi
+# SupplementaryGroups=adm
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

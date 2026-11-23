@@ -1,0 +1,13 @@
+{
+  "_hinweis": "Vorlage. Bei Bedarf als config.json kopieren und anpassen. Alle Schluessel sind optional, fehlende nutzen die Standardwerte aus backend/server.py. Im Browser geaenderte Einstellungen (Pfade, HTTPS) liegen in data/settings.json und haben Vorrang.",
+  "listen_host": "0.0.0.0",
+  "listen_port": 8080,
+  "eve_json": "/var/log/suricata/eve.json",
+  "fast_log": "/var/log/suricata/fast.log",
+  "alert_source": "fastlog",
+  "db_path": "data/suricata.db",
+  "poll_interval_seconds": 5,
+  "retention_days": 30,
+  "start_at_end": false,
+  "new_signature_hours": 24
+}
