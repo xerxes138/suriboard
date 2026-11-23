@@ -11,7 +11,7 @@
     { h: 168, label: "7 Tage" }, { h: 720, label: "30 Tage" },
   ];
   const REFRESH_MS = 30000;
-  const FRONTEND_VERSION = "1.9.0";
+  const FRONTEND_VERSION = "1.9.1";
 
   async function api(path, opts) {
     const r = await fetch(path, { credentials: "same-origin", ...(opts || {}) });
@@ -669,11 +669,14 @@
   function useFlagging(refresh) {
     const [target, setTarget] = useState(null);
     const unflag = async (a) => {
-      await api(`/api/flags?gid=${a.gid}&sid=${a.sid}`, { method: "DELETE" });
+      try { await api(`/api/flags?gid=${a.gid}&sid=${a.sid}`, { method: "DELETE" }); }
+      catch (e) { alert(e.message); }
       refresh();
     };
-    const dialog = html`<${FlagDialog} target=${target} onClose=${() => setTarget(null)}
-      onDone=${() => { setTarget(null); refresh(); }} />`;
+    // Nur einbinden, solange der Dialog offen ist, und pro Signatur neu (key):
+    // so startet jeder Aufruf mit leerem Notizfeld und nicht "busy" vom letzten Speichern
+    const dialog = target ? html`<${FlagDialog} key=${target.gid + ":" + target.sid} target=${target}
+      onClose=${() => setTarget(null)} onDone=${() => { setTarget(null); refresh(); }} />` : null;
     return { flag: setTarget, unflag, dialog };
   }
 
