@@ -11,7 +11,7 @@
     { h: 168, label: "7 Tage" }, { h: 720, label: "30 Tage" },
   ];
   const REFRESH_MS = 30000;
-  const FRONTEND_VERSION = "1.9.1";
+  const FRONTEND_VERSION = "1.9.2";
 
   async function api(path, opts) {
     const r = await fetch(path, { credentials: "same-origin", ...(opts || {}) });

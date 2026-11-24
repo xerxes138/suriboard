@@ -19,9 +19,15 @@ Kommandozeile:
     python3 backend/userdata.py export [datei.json] [--no-users]
     python3 backend/userdata.py import datei.json [--mode merge|replace] [--only devices,settings,...]
     python3 backend/userdata.py list
+    python3 backend/userdata.py db-backup datei.db[.gz]   # komplette Datenbank inkl. Lernprofile
+    python3 backend/userdata.py db-restore datei.db[.gz]  # nur bei gestopptem Dienst
 """
 
 import contextlib
+import gzip
+import shutil
+import sqlite3
+import subprocess
 import hashlib
 import json
 import logging
@@ -379,6 +385,117 @@ SECTION_ALIASES = {"devices": "device_names", "geraete": "device_names", "signat
                    "fingerprints": "fp_notes"}
 
 
+# --------------------------------------------------------------------------
+# Komplette Datenbank sichern/wiederherstellen (inkl. Anomalie-Lernprofilen)
+# --------------------------------------------------------------------------
+
+def _integrity(path):
+    c = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+    try:
+        res = c.execute("PRAGMA integrity_check").fetchone()[0]
+        tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    finally:
+        c.close()
+    if res != "ok":
+        raise ValueError("Datenbank beschädigt: %s" % res)
+    return tables
+
+
+def _table_counts(path, tables=("dev_hours", "dev_seen", "dev_meta", "anomalies", "device_names", "flows")):
+    c = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+    out = {}
+    try:
+        have = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        for t in tables:
+            if t in have:
+                out[t] = c.execute("SELECT COUNT(*) FROM %s" % t).fetchone()[0]
+    finally:
+        c.close()
+    return out
+
+
+def db_backup(db_path, dest):
+    """Konsistente Kopie per SQLite-Backup-API; funktioniert auch im laufenden Betrieb."""
+    if not os.path.exists(db_path):
+        raise OSError("Datenbank %s nicht gefunden" % db_path)
+    dest = os.path.abspath(dest)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    gz = dest.endswith(".gz")
+    plain = (dest[:-3] if gz else dest) + ".tmp"
+    if os.path.exists(plain):
+        os.remove(plain)
+    fd = os.open(plain, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.close(fd)
+    src = sqlite3.connect(db_path, timeout=30)
+    dst = sqlite3.connect(plain)
+    try:
+        src.execute("PRAGMA busy_timeout=30000")
+        src.backup(dst, pages=1024, sleep=0.05)
+        dst.execute("PRAGMA journal_mode=DELETE")   # eine einzelne Datei, ohne -wal
+        dst.execute("VACUUM")
+    finally:
+        dst.close()
+        src.close()
+    _integrity(plain)
+    counts = _table_counts(plain)
+    if gz:
+        fd = os.open(dest + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with open(plain, "rb") as fi, gzip.GzipFile(fileobj=os.fdopen(fd, "wb"), mode="wb") as fo:
+            shutil.copyfileobj(fi, fo, 1 << 20)
+        os.remove(plain)
+        os.replace(dest + ".tmp", dest)
+    else:
+        os.replace(plain, dest)
+    return counts
+
+
+def service_active(name="suricata-dashboard"):
+    try:
+        return subprocess.run(["systemctl", "is-active", "--quiet", name],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def db_restore(db_path, src):
+    """Spielt eine mit db_backup erstellte Datei zurueck. Die bisherige DB wird vorher gesichert."""
+    if not os.path.exists(src):
+        raise OSError("Datei %s nicht gefunden" % src)
+    tmp = None
+    try:
+        if src.endswith(".gz"):
+            tmp = db_path + ".restore.tmp"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with gzip.open(src, "rb") as fi, os.fdopen(fd, "wb") as fo:
+                shutil.copyfileobj(fi, fo, 1 << 20)
+            src = tmp
+        try:
+            tables = _integrity(src)
+        except sqlite3.DatabaseError as e:
+            raise ValueError("%s ist keine gültige Datenbank (%s)" % (src, e))
+        if "device_names" not in tables:
+            raise ValueError("%s ist keine Datenbank des Suricata Dashboards" % src)
+        saved = None
+        if os.path.exists(db_path):
+            saved = db_path + ".vor-restore-" + time.strftime("%Y%m%d-%H%M%S")
+            db_backup(db_path, saved)
+        s = sqlite3.connect("file:%s?mode=ro" % src, uri=True)
+        d = sqlite3.connect(db_path, timeout=30)
+        try:
+            s.backup(d)
+            d.execute("PRAGMA journal_mode=WAL")
+            d.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            d.close()
+            s.close()
+        with contextlib.suppress(OSError):
+            os.chmod(db_path, 0o600)
+        return _table_counts(db_path), saved
+    finally:
+        if tmp and os.path.exists(tmp):
+            os.remove(tmp)
+
+
 def cli():
     import argparse
     import server  # noqa: lazy, vermeidet Kreis-Import
@@ -396,9 +513,36 @@ def cli():
     p.add_argument("--mode", choices=("merge", "replace"), default="merge")
     p.add_argument("--only", help="Abschnitte, z. B. devices,settings (Standard: alle in der Datei)")
     sub.add_parser("list", help="Automatische Sicherungen anzeigen")
+    p = sub.add_parser("db-backup", help="Komplette Datenbank inkl. Anomalie-Lernprofilen sichern")
+    p.add_argument("file", help="Zieldatei, mit .gz-Endung komprimiert")
+    p = sub.add_parser("db-restore", help="Komplette Datenbank zurückspielen (Dienst vorher stoppen)")
+    p.add_argument("file")
+    p.add_argument("--force", action="store_true", help="auch wenn der Dienst zu laufen scheint")
     args = ap.parse_args()
 
     cfg = server.load_config(args.config)
+    if args.cmd in ("db-backup", "db-restore"):
+        labels = {"dev_hours": "Stundenwerte", "dev_seen": "bekannte Ziele", "dev_meta": "Geräteprofile",
+                  "anomalies": "Anomalien", "device_names": "Gerätenamen", "flows": "Verbindungen"}
+        fmt_counts = lambda c: ", ".join("%s %d" % (labels.get(k, k), v) for k, v in c.items())
+        try:
+            if args.cmd == "db-backup":
+                counts = db_backup(cfg["db_path"], args.file)
+                size = os.path.getsize(args.file)
+                human = "%.1f MB" % (size / 1e6) if size >= 1e6 else "%d KB" % max(1, size // 1000)
+                print("Datenbank gesichert nach %s (%s): %s" % (args.file, human, fmt_counts(counts)))
+            else:
+                if service_active() and not args.force:
+                    raise ValueError("Der Dienst läuft noch. Erst stoppen: sudo systemctl stop suricata-dashboard")
+                counts, saved = db_restore(cfg["db_path"], args.file)
+                if saved:
+                    print("Bisherige Datenbank gesichert als %s" % saved)
+                print("Datenbank wiederhergestellt: %s" % fmt_counts(counts))
+                print("Jetzt starten: sudo systemctl start suricata-dashboard")
+        except (OSError, ValueError, sqlite3.Error) as e:
+            print("Fehler:", e, file=sys.stderr)
+            return 1
+        return 0
     os.makedirs(os.path.dirname(cfg["db_path"]), exist_ok=True)
     conn = server.connect(cfg["db_path"])
     conn.executescript(server.SCHEMA)

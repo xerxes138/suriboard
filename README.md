@@ -237,6 +237,8 @@ So bewertet das Dashboard:
 
 Verbindungen, Alerts, Hostnamen und die IP-zu-MAC-Zuordnung lernt das Dashboard aus eve.json neu. Ein MAC-Gerätename erscheint deshalb wieder, sobald das Gerät im Netz auftaucht.
 
+**Nicht im JSON-Export enthalten** sind die gelernten Profile der Anomalie-Erkennung: Stundenwerte, bekannte Ports, Länder und Domains, Lernstatus und bisherige Warnungen. Sie liegen nur in `data/suricata.db`. Gehen sie verloren, beginnt die Lernphase von vorn (7 Tage). Für sie gibt es die komplette Datenbanksicherung (siehe unten).
+
 **Im Browser** (Einstellungen → Sichern & Wiederherstellen):
 - **Exportieren** lädt eine JSON-Datei herunter.
 - **Importieren** zeigt vor dem Übernehmen, was in der Datei steht. Du wählst die Bereiche und ob die Daten *zusammengeführt* oder *ersetzt* werden.
@@ -253,19 +255,35 @@ sudo ./userdata.sh list                                   # automatische Sicheru
 
 Nach einem Import auf der Kommandozeile den Dienst neu starten.
 
+**Komplette Datenbank sichern** (inklusive Lernprofile der Anomalie-Erkennung, Verbindungen und Alerts):
+
+```bash
+sudo ./userdata.sh db-backup ~/dashboard-db-$(date +%F).db.gz    # geht auch im laufenden Betrieb
+sudo systemctl stop suricata-dashboard
+sudo ./userdata.sh db-restore ~/dashboard-db-2026-11-24.db.gz    # nur bei gestopptem Dienst
+sudo systemctl start suricata-dashboard
+```
+
+- `db-backup` nutzt die Backup-Funktion von SQLite. Die Kopie ist deshalb auch im laufenden Betrieb vollständig und konsistent, einschließlich der Einträge, die noch in `suricata.db-wal` stehen. Endet der Dateiname auf `.gz`, wird komprimiert. Danach wird die Kopie auf Beschädigung geprüft.
+- `db-restore` prüft die Datei vorher und verweigert den Start, solange der Dienst läuft. Die bisherige Datenbank bleibt als `data/suricata.db.vor-restore-<Zeitpunkt>` erhalten; diese Datei kannst du löschen, wenn alles passt.
+- `settings.json`, Feeds und TLS-Zertifikat liegen nicht in der Datenbank. Sie sind über den JSON-Export bzw. die automatischen Sicherungen abgedeckt oder werden neu erzeugt.
+
 ### Programm aktualisieren
 
 Alles, was du im Browser einstellst, liegt seit Version 1.8 im Ordner `data/`. Die Pfade und die HTTPS-Einstellung stehen dort in `data/settings.json` und nicht mehr in `config.json`. So geht es sicher:
 
 ```bash
-sudo systemctl stop suricata-dashboard          # wichtig: erst stoppen
-sudo ./userdata.sh export ~/dashboard-sicherung.json   # zusätzliche Sicherung (optional)
+sudo ./userdata.sh db-backup ~/dashboard-db-$(date +%F).db.gz   # Sicherung inkl. Anomalie-Lernprofilen
+sudo ./userdata.sh export ~/dashboard-sicherung.json   # zusätzliche Sicherung der eigenen Eingaben (optional)
+sudo systemctl stop suricata-dashboard          # wichtig: vor dem Kopieren stoppen
 # neue Programmdateien kopieren; data/ (und eine eigene config.json) dabei NICHT überschreiben, z. B.:
 sudo rsync -a --exclude data --exclude config.json /tmp/suricata-dashboard/ /opt/suricata-dashboard/
 sudo systemctl start suricata-dashboard
 ```
 
 Warum das Stoppen wichtig ist: Die Datenbank läuft im WAL-Modus. Neue Einträge stehen zunächst in `suricata.db-wal` und wandern erst später in `suricata.db`. Seit 1.8 übernimmt das Dashboard beim Beenden alles in `suricata.db`. Kopiert man die Datenbank im laufenden Betrieb oder nur `suricata.db` ohne die `-wal`-Datei, können die letzten Änderungen fehlen. Das ist wahrscheinlich der Grund, warum früher Gerätenamen verloren gingen.
+
+Die gelernten Profile der Anomalie-Erkennung bleiben dabei erhalten, weil sie in `data/suricata.db` liegen und `data/` nicht angefasst wird. Die Erkennung macht nach dem Start einfach weiter. Die `db-backup`-Datei ist nur für den Notfall gedacht, z. B. wenn beim Kopieren versehentlich `data/` überschrieben wurde.
 
 Die mitgelieferte Konfiguration heißt jetzt `config.example.json`. Ein Kopieren des Programmordners überschreibt deine `config.json` also nicht mehr. Beim ersten Start von 1.8 übernimmt das Dashboard bisher im Browser geänderte Pfade aus `config.json` automatisch nach `data/settings.json`.
 

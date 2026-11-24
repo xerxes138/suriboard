@@ -42,7 +42,7 @@ import tls
 import userdata
 import anomaly
 
-VERSION = "1.9.1"
+VERSION = "1.9.2"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(BASE_DIR)
