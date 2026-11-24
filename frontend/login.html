@@ -13,27 +13,55 @@
 <body class="login-page">
   <main class="login-wrap">
     <form class="card login-card" id="f" autocomplete="on">
-      <div class="brand"><i class="dot"></i>Suricata IPS</div>
-      <h1>Anmelden</h1>
+      <div class="login-top"><div class="brand"><i class="dot"></i>Suricata IPS</div>
+        <button type="button" class="icon-btn lang-btn" id="lang"></button></div>
+      <h1 data-t="Anmelden">Anmelden</h1>
       <div class="field">
-        <label for="u">Benutzername</label>
+        <label for="u" data-t="Benutzername">Benutzername</label>
         <input type="text" id="u" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus>
       </div>
       <div class="field">
-        <label for="p">Passwort</label>
+        <label for="p" data-t="Passwort">Passwort</label>
         <input type="password" id="p" name="password" autocomplete="current-password" required>
       </div>
-      <label class="remember"><input type="checkbox" id="r"> Angemeldet bleiben (30 Tage)</label>
+      <label class="remember"><input type="checkbox" id="r"> <span data-t="Angemeldet bleiben (30 Tage)">Angemeldet bleiben (30 Tage)</span></label>
       <div class="err" id="e" hidden></div>
-      <button class="btn primary login-btn" id="b" type="submit">Anmelden</button>
-      <p class="login-hint" id="h" hidden>
-        Die Verbindung ist nicht verschlüsselt. Passwörter lassen sich im Netz mitlesen –
-        aktiviere HTTPS unter Einstellungen.
-      </p>
+      <button class="btn primary login-btn" id="b" type="submit" data-t="Anmelden">Anmelden</button>
+      <p class="login-hint" id="h" hidden data-t="Die Verbindung ist nicht verschlüsselt. Passwörter lassen sich im Netz mitlesen – aktiviere HTTPS unter Einstellungen.">Die Verbindung ist nicht verschlüsselt. Passwörter lassen sich im Netz mitlesen – aktiviere HTTPS unter Einstellungen.</p>
     </form>
   </main>
   <script>
     (function () {
+      // Language: same setting as the dashboard (localStorage "lang"), default from the browser language
+      var EN = {
+        "Anmelden": "Log in", "Benutzername": "User name", "Passwort": "Password",
+        "Angemeldet bleiben (30 Tage)": "Stay logged in (30 days)",
+        "Die Verbindung ist nicht verschlüsselt. Passwörter lassen sich im Netz mitlesen – aktiviere HTTPS unter Einstellungen.":
+          "The connection is not encrypted. Passwords can be read on the network – enable HTTPS in the settings.",
+        "Benutzername oder Passwort falsch.": "Wrong user name or password.",
+        "Zu viele Fehlversuche. Bitte in {n} s erneut versuchen.": "Too many failed attempts. Please try again in {n} s.",
+        "Anmeldung fehlgeschlagen ({n})": "Login failed ({n})", "Server nicht erreichbar.": "Server not reachable."
+      };
+      var lang = "de";
+      try { lang = localStorage.getItem("lang") || ""; } catch (x) {}
+      if (lang !== "de" && lang !== "en") lang = (navigator.language || "de").toLowerCase().indexOf("de") === 0 ? "de" : "en";
+      document.documentElement.lang = lang;
+      function T(s, n) {
+        var r = lang === "en" && EN[s] ? EN[s] : s;
+        if (lang === "en" && !EN[s]) { var m = /(\d+)/.exec(s); var k = s.replace(/\d+/, "{n}"); if (m && EN[k]) r = EN[k].replace("{n}", m[1]); }
+        return n != null ? r.replace("{n}", n) : r;
+      }
+      var nodes = document.querySelectorAll("[data-t]");
+      for (var i = 0; i < nodes.length; i++) nodes[i].textContent = T(nodes[i].getAttribute("data-t"));
+      if (lang === "en") document.title = "Log in – Suricata Dashboard";
+      var lb = document.getElementById("lang");
+      lb.textContent = lang === "de" ? "EN" : "DE";
+      lb.title = lang === "de" ? "Switch to English" : "Auf Deutsch umschalten";
+      lb.addEventListener("click", function () {
+        try { localStorage.setItem("lang", lang === "de" ? "en" : "de"); } catch (x) {}
+        location.reload();
+      });
+
       var f = document.getElementById("f"), e = document.getElementById("e"), b = document.getElementById("b");
       if (location.protocol !== "https:") document.getElementById("h").hidden = false;
       var timer = null;
@@ -44,7 +72,7 @@
         timer = setInterval(function () {
           sec -= 1;
           if (sec <= 0) { clearInterval(timer); b.disabled = false; show(""); return; }
-          show("Zu viele Fehlversuche. Bitte in " + sec + " s erneut versuchen.");
+          show(T("Zu viele Fehlversuche. Bitte in {n} s erneut versuchen.", sec));
         }, 1000);
       }
       f.addEventListener("submit", function (ev) {
@@ -60,12 +88,12 @@
         }).then(function (r) {
           return r.json().catch(function () { return {}; }).then(function (j) {
             if (r.ok) { location.replace("/"); return; }
-            show(j.error || "Anmeldung fehlgeschlagen (" + r.status + ")");
+            show(j.error ? T(j.error) : T("Anmeldung fehlgeschlagen ({n})", r.status));
             document.getElementById("p").value = "";
             document.getElementById("p").focus();
             if (j.retry_after) lock(j.retry_after); else b.disabled = false;
           });
-        }).catch(function () { show("Server nicht erreichbar."); b.disabled = false; });
+        }).catch(function () { show(T("Server nicht erreichbar.")); b.disabled = false; });
       });
     })();
   </script>

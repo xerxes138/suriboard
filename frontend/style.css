@@ -470,3 +470,8 @@ pre.rule-text { white-space: pre-wrap; word-break: break-all; font-size: 11.5px;
 .rule-env:empty { display: none; }
 .warnmsg pre.json { margin-top: 6px; }
 details > summary { cursor: pointer; }
+
+/* Sprachumschalter */
+.lang-btn { font-size: 12px; font-weight: 600; min-width: 34px; }
+.login-top { display: flex; justify-content: space-between; align-items: flex-start; }
+.login-top .brand { margin-bottom: 14px; }

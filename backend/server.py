@@ -43,7 +43,7 @@ import userdata
 import anomaly
 import rules as rulesmod
 
-VERSION = "1.10.0"
+VERSION = "1.11.0"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(BASE_DIR)

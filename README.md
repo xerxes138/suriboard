@@ -4,7 +4,7 @@ A lightweight web dashboard for Suricata (IPS/IDS) on a Raspberry Pi, similar in
 
 - **Backend:** Python 3, standard library only (no `pip install`). It reads `eve.json` and `fast.log` incrementally every few seconds, aggregates the data in SQLite and serves a JSON API.
 - **Frontend:** React (with htm instead of JSX) and Chart.js. All libraries are bundled in `frontend/vendor/`, so there is **no build step**. Only the Pi itself needs internet access, to download threat feeds (optional, see below).
-- **Language:** the web interface is in German. UI labels are quoted below in German with an English translation where it helps.
+- **Language:** the web interface is available in German and English. The **EN/DE** button at the top right (also on the login page) switches the language; on first visit the browser language decides. The choice is stored per browser. UI labels are quoted below in German with the English label where it helps. Command line tools and log messages are in German.
 
 ## Features
 
@@ -407,7 +407,8 @@ backend/anomaly.py          behaviour profiles of local devices and anomaly dete
 backend/rules.py            own blocking rules: build, read/write local.rules, check suricata.yaml, reload
 frontend/index.html         entry point
 frontend/login.html         login page
-frontend/app.js             React app
+frontend/app.js             React app (German source texts)
+frontend/i18n-en.js         English translations, keyed by the German text
 frontend/style.css          styles (light/dark)
 frontend/vendor/            React 18.3.1, htm 3.1.1, Chart.js 4.4.1
 config.example.json         template for config.json (optional)
@@ -417,6 +418,15 @@ users.sh                    manage users on the command line
 userdata.sh                 export/import user data, database backup/restore
 suricata-dashboard.service  systemd unit
 ```
+
+### Translations
+
+German is the source language of the UI. `frontend/i18n-en.js` maps German texts to English:
+
+- Static text in `html` templates, the props `title`, `placeholder` and `aria-label`, and string props of components are translated automatically when they match a key exactly (whitespace is collapsed).
+- Texts composed with values use `T("… {n} …", { n })` in `app.js` and the same key with placeholders in `i18n-en.js`.
+- Messages from the backend that contain values (e.g. `ungültige Domain: x`) are matched by `I18N_EN_PATTERNS` (regular expressions).
+- In English mode, `window.__i18nMissing` in the browser console lists German texts that had no translation.
 
 ### API
 

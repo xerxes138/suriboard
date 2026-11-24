@@ -2,7 +2,64 @@
 (function () {
   "use strict";
   const { useState, useEffect, useRef, useMemo, useCallback } = React;
-  const html = htm.bind(React.createElement);
+
+  // ------------------------------------------------------------------ Sprache (de/en)
+  // German is the source language. English comes from window.I18N_EN (i18n-en.js), keyed by the
+  // German text. Every string child and the props title/placeholder/aria-label (and all string props
+  // of components) are looked up automatically; composed strings use T("… {n} …", { n }).
+  const LANG = (() => {
+    try { const l = localStorage.getItem("lang"); if (l === "de" || l === "en") return l; } catch (e) {}
+    return (navigator.language || "de").toLowerCase().startsWith("de") ? "de" : "en";
+  })();
+  document.documentElement.lang = LANG;
+  const DICT = LANG === "en" ? (window.I18N_EN || {}) : null;
+  const PATTERNS = DICT ? (window.I18N_EN_PATTERNS || []).map(([re, rep]) => [new RegExp(re), rep]) : [];
+  const MISSING = new Set();
+  function trPattern(key) {
+    for (const [re, rep] of PATTERNS) {
+      const m = re.exec(key);
+      if (m) return rep.replace(/\$(\d)/g, (_, i) => tr(m[+i] || ""));
+    }
+    return undefined;
+  }
+  function tr(s) {
+    if (!DICT || typeof s !== "string" || !/[A-Za-zÄÖÜäöüß]/.test(s)) return s;
+    const m = /^(\s*)([\s\S]*?)(\s*)$/.exec(s);
+    const key = m[2].replace(/\s+/g, " ");
+    let v = DICT[key];
+    if (v === undefined) v = trPattern(key);
+    if (v === undefined) { if (/[äöüÄÖÜß]/.test(key)) MISSING.add(key); return s; }
+    // a fragment that becomes pure punctuation (e.g. " nicht." -> ".") must not keep its leading space
+    return (/^[.,:;)]/.test(v) ? "" : m[1]) + v + m[3];
+  }
+  function T(s, vars) {
+    let r = DICT ? (DICT[s] !== undefined ? DICT[s] : (MISSING.add(s), s)) : s;
+    if (vars) r = r.replace(/\{(\w+)\}/g, (_, k) => (vars[k] != null ? vars[k] : ""));
+    return r;
+  }
+  window.__i18nMissing = MISSING;
+  const DOM_TEXT_PROPS = ["title", "placeholder", "aria-label", "alt"];
+  // multi-root htm templates come as arrays (e.g. ${cond ? html`text <b>x</b> more` : ""})
+  const trChild = (c) => (typeof c === "string" ? tr(c) : Array.isArray(c) ? c.map(trChild) : c);
+  function h(type, props, ...children) {
+    if (DICT) {
+      if (props) {
+        props = Object.assign({}, props);
+        if (typeof type === "string") {
+          for (const k of DOM_TEXT_PROPS) if (typeof props[k] === "string") props[k] = tr(props[k]);
+        } else {
+          for (const k in props) if (k !== "key" && typeof props[k] === "string") props[k] = tr(props[k]);
+        }
+      }
+      for (let i = 0; i < children.length; i++) children[i] = trChild(children[i]);
+    }
+    return React.createElement(type, props, ...children);
+  }
+  const html = htm.bind(h);
+  function setLang(l) {
+    try { localStorage.setItem("lang", l); } catch (e) {}
+    window.location.reload();
+  }
 
   // ------------------------------------------------------------------ Hilfen
 
@@ -11,7 +68,7 @@
     { h: 168, label: "7 Tage" }, { h: 720, label: "30 Tage" },
   ];
   const REFRESH_MS = 30000;
-  const FRONTEND_VERSION = "1.10.0";
+  const FRONTEND_VERSION = "1.11.0";
 
   async function api(path, opts) {
     const r = await fetch(path, { credentials: "same-origin", ...(opts || {}) });
@@ -42,7 +99,7 @@
     return state;
   }
 
-  const nf = new Intl.NumberFormat("de-DE");
+  const nf = new Intl.NumberFormat(LANG === "en" ? "en-US" : "de-DE");
   const fmtNum = (n) => (n == null ? "–" : nf.format(n));
   function fmtBytes(b) {
     if (b == null) return "–";
@@ -55,21 +112,23 @@
   function fmtTime(ts, withDate) {
     const d = new Date(ts * 1000);
     const t = pad(d.getHours()) + ":" + pad(d.getMinutes());
-    return withDate ? pad(d.getDate()) + "." + pad(d.getMonth() + 1) + ". " + t : t;
+    if (!withDate) return t;
+    return LANG === "en" ? pad(d.getMonth() + 1) + "/" + pad(d.getDate()) + " " + t : pad(d.getDate()) + "." + pad(d.getMonth() + 1) + ". " + t;
   }
   function fmtDateTime(ts) {
     if (!ts) return "–";
     const d = new Date(ts * 1000);
-    return pad(d.getDate()) + "." + pad(d.getMonth() + 1) + "." + d.getFullYear() + " " +
-      pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+    const day = LANG === "en" ? d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate())
+      : pad(d.getDate()) + "." + pad(d.getMonth() + 1) + "." + d.getFullYear();
+    return day + " " + pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
   }
   function fmtAgo(ts) {
     if (!ts) return "–";
     const s = Math.max(0, Date.now() / 1000 - ts);
-    if (s < 60) return "gerade eben";
-    if (s < 3600) return "vor " + Math.round(s / 60) + " Min";
-    if (s < 86400) return "vor " + Math.round(s / 3600) + " Std";
-    return "vor " + Math.round(s / 86400) + " Tagen";
+    if (s < 60) return T("gerade eben");
+    if (s < 3600) return T("vor {n} Min", { n: Math.round(s / 60) });
+    if (s < 86400) return T("vor {n} Std", { n: Math.round(s / 3600) });
+    return T("vor {n} Tagen", { n: Math.round(s / 86400) });
   }
   const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
@@ -174,7 +233,7 @@
           datasets: series.map((s) => {
             const c = seriesColor(s.name, group);
             return {
-              label: s.name, data: s.data, fill: true, borderColor: c, borderWidth: 1.5,
+              label: tr(s.name), data: s.data, fill: true, borderColor: c, borderWidth: 1.5,
               backgroundColor: hexAlpha(c, 0.8), pointRadius: 0, pointHoverRadius: 4,
               pointHoverBorderColor: cssVar("--surface"), pointHoverBorderWidth: 2,
               pointHoverBackgroundColor: c, tension: 0.25,
@@ -216,7 +275,7 @@
         data: {
           labels,
           datasets: data.series.map((s) => ({
-            label: s.name, data: s.data, backgroundColor: cssVar(SEV_COLORS[s.name] || "--series-other"),
+            label: tr(s.name), data: s.data, backgroundColor: cssVar(SEV_COLORS[s.name] || "--series-other"),
             borderColor: cssVar("--surface"), borderWidth: { top: 1 }, borderRadius: 2,
             borderSkipped: "bottom", categoryPercentage: 0.9, barPercentage: 1,
           })),
@@ -305,7 +364,7 @@
     let ok = false;
     try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
     document.body.removeChild(ta);
-    if (!ok) window.prompt("Kopieren mit Strg+C:", text);
+    if (!ok) window.prompt(T("Kopieren mit Strg+C:"), text);
     return true;
   }
 
@@ -318,7 +377,7 @@
       setTimeout(() => setDone(false), 1200);
     };
     return html`<button class=${"copy" + (label ? " labeled" : "") + (done ? " done" : "")}
-      title=${title || "„" + text + "“ kopieren"} aria-label=${title || "kopieren"} onClick=${click}>
+      title=${title || T("„{x}“ kopieren", { x: text })} aria-label=${title || "kopieren"} onClick=${click}>
       ${done ? "✓" : "⧉"}${label ? html`<span>${done ? "kopiert" : label}</span>` : null}</button>`;
   }
 
@@ -332,7 +391,7 @@
   function DevName({ ip }) {
     const d = useDevName(ip);
     if (!d) return null;
-    return html`<span class=${"devname" + (d[1] === "dhcp" ? " dhcp" : "")} title=${"Gerät: " + d[0] + " (" + (NAME_SRC[d[1]] || d[1]) + ")"}>${d[0]}</span>`;
+    return html`<span class=${"devname" + (d[1] === "dhcp" ? " dhcp" : "")} title=${T("Gerät: {x}", { x: d[0] }) + " (" + tr(NAME_SRC[d[1]] || d[1]) + ")"}>${d[0]}</span>`;
   }
 
   function Endpoint({ ip, port, onIp }) {
@@ -366,7 +425,7 @@
   function RepBadge({ r, withName }) {
     if (!r || r.verdict === "local") return null;
     const v = VERDICTS[r.verdict] || VERDICTS.unknown;
-    const title = [v.label.toUpperCase(), r.name ? "Hostname: " + r.name : null, ...(r.reasons || [])].filter(Boolean).join("\n");
+    const title = [tr(v.label).toUpperCase(), r.name ? T("Hostname: {x}", { x: r.name }) : null, ...(r.reasons || [])].filter(Boolean).join("\n");
     const extra = withName && r.verdict !== "popular" && r.name ? r.name : null;
     return html`<span class="rep-wrap" title=${title}>
       <span class=${"rep " + r.verdict}>${v.icon ? v.icon + " " : ""}${repText(r)}</span>
@@ -444,9 +503,9 @@
     switch (ev.event_type) {
       case "flow":
         return [ev.app_proto || ev.proto, fmtBytes(f.bytes_toserver || 0) + " ↑ / " + fmtBytes(f.bytes_toclient || 0) + " ↓",
-          ((f.pkts_toserver || 0) + (f.pkts_toclient || 0)) + " Pakete",
-          f.age != null ? "Dauer " + f.age + " s" : null, f.state, f.reason,
-          f.action ? "Aktion: " + f.action : null, f.alerted ? "mit Alert" : null].filter(Boolean).join(" · ");
+          T("{n} Pakete", { n: (f.pkts_toserver || 0) + (f.pkts_toclient || 0) }),
+          f.age != null ? T("Dauer {n} s", { n: f.age }) : null, f.state, f.reason,
+          f.action ? T("Aktion: {x}", { x: f.action }) : null, f.alerted ? T("mit Alert") : null].filter(Boolean).join(" · ");
       case "dns": {
         const d = ev.dns || {};
         const name = d.rrname || (d.queries && d.queries[0] && d.queries[0].rrname) || (d.answers && d.answers[0] && d.answers[0].rrname) || "";
@@ -457,7 +516,7 @@
       }
       case "tls": {
         const t = ev.tls || {};
-        return ["SNI " + (t.sni || "–"), t.version, t.subject ? "Zertifikat: " + t.subject : null,
+        return ["SNI " + (t.sni || "–"), t.version, t.subject ? T("Zertifikat: {x}", { x: t.subject }) : null,
           t.ja3 && t.ja3.hash ? "JA3 " + t.ja3.hash : null,
           typeof t.ja4 === "string" ? "JA4 " + t.ja4 : null].filter(Boolean).join(" · ");
       }
@@ -529,9 +588,9 @@
         ${!a.reasons.some((r) => r.level !== "info") ? html`<li class="lvl-unknown">Auf keiner geladenen Liste, kein bekannter Dienst.</li>` : null}</ul>
       ${a.names && a.names.length ? html`<div class="hostnames">${a.names.map((n) => html`
         <span key=${n.name} class=${"hn" + (n.lists.length ? " bad" : n.service ? " good" : "")}
-          title=${[n.source ? "gesehen über " + n.source : null, n.last_seen ? "zuletzt " + fmtDateTime(n.last_seen) : null,
-            n.service ? "Dienst: " + n.service : null, n.rank ? "Tranco-Rang " + n.rank : null,
-            ...n.lists.map((l) => "auf " + l.name + (l.via && l.via !== n.name ? " (als " + l.via + ")" : ""))].filter(Boolean).join("\n")}>
+          title=${[n.source ? T("gesehen über {x}", { x: n.source }) : null, n.last_seen ? T("zuletzt {x}", { x: fmtDateTime(n.last_seen) }) : null,
+            n.service ? T("Dienst: {x}", { x: n.service }) : null, n.rank ? T("Tranco-Rang {n}", { n: n.rank }) : null,
+            ...n.lists.map((l) => T("auf {x}", { x: tr(l.name) }) + (l.via && l.via !== n.name ? T(" (als {x})", { x: l.via }) : ""))].filter(Boolean).join("\n")}>
           ${n.name}${n.rank ? html`<span class="cat"> #${fmtNum(n.rank)}</span>` : null}</span>`)}
         ${a.names_total > a.names.length ? html`<span class="cat">+ ${a.names_total - a.names.length} weitere</span>` : null}</div>`
         : !compact && html`<div class="cat">Kein Hostname zu dieser IP bekannt (DNS-Antwort, TLS-SNI oder HTTP-Host).</div>`}
@@ -553,9 +612,9 @@
     const nameText = (ip) => [devNames[ip] && devNames[ip][0], ...names(ip).map((n) => n.name)].filter(Boolean).join(", ");
     const summaryText = [
       fmtDateTime(a.ts) + "  " + a.signature,
-      "SID " + a.gid + ":" + a.sid + " · Schwere " + a.severity + " · " + a.action + (a.category ? " · " + a.category : ""),
-      "Quelle: " + a.src_ip + (a.src_port != null ? ":" + a.src_port : "") + (nameText(a.src_ip) ? "  (" + nameText(a.src_ip) + ")" : ""),
-      "Ziel:   " + a.dest_ip + (a.dest_port != null ? ":" + a.dest_port : "") + (nameText(a.dest_ip) ? "  (" + nameText(a.dest_ip) + ")" : ""),
+      "SID " + a.gid + ":" + a.sid + " · " + T("Schwere") + " " + a.severity + " · " + a.action + (a.category ? " · " + a.category : ""),
+      T("Quelle:") + " " + a.src_ip + (a.src_port != null ? ":" + a.src_port : "") + (nameText(a.src_ip) ? "  (" + nameText(a.src_ip) + ")" : ""),
+      (T("Ziel:") + "      ").slice(0, 7) + " " + a.dest_ip + (a.dest_port != null ? ":" + a.dest_port : "") + (nameText(a.dest_ip) ? "  (" + nameText(a.dest_ip) + ")" : ""),
       "Proto:  " + a.proto + (a.app_proto ? "/" + a.app_proto : ""),
       data && data.flow_ids.length ? "Flow-ID: " + data.flow_ids.join(", ") : null,
     ].filter(Boolean).join("\n");
@@ -615,7 +674,7 @@
         <div class="ctx-bar">
           <div><b>Kontext aus eve.json</b>
             <div class="cat">${loading ? "durchsuche eve.json …" : data
-              ? `${fmtNum(data.events_scanned)} passende Events · ${fmtBytes(data.files.reduce((s, f) => s + f.bytes_read, 0))} gelesen · ${fmtClock(data.window.from)}–${fmtClock(data.window.to)}`
+              ? T("{n} passende Events · {b} gelesen · {from}–{to}", { n: fmtNum(data.events_scanned), b: fmtBytes(data.files.reduce((s, f) => s + f.bytes_read, 0)), from: fmtClock(data.window.from), to: fmtClock(data.window.to) })
               : ""}</div></div>
           <div class="seg">${WINDOWS.map((x, i) => html`<button key=${i} class=${i === win ? "active" : ""} onClick=${() => setWin(i)}>${x.label}</button>`)}</div>
         </div>
@@ -656,7 +715,7 @@
         await api("/api/flags", { method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ gid: target.gid, sid: target.sid, note }) });
         onDone();
-      } catch (e) { alert(e.message); setBusy(false); }
+      } catch (e) { alert(tr(e.message)); setBusy(false); }
     };
     return html`<div class="modal-bg" onClick=${(e) => e.target === e.currentTarget && onClose()}>
       <div class="modal" role="dialog" aria-modal="true">
@@ -678,7 +737,7 @@
     const [target, setTarget] = useState(null);
     const unflag = async (a) => {
       try { await api(`/api/flags?gid=${a.gid}&sid=${a.sid}`, { method: "DELETE" }); }
-      catch (e) { alert(e.message); }
+      catch (e) { alert(tr(e.message)); }
       refresh();
     };
     // Nur einbinden, solange der Dialog offen ist, und pro Signatur neu (key):
@@ -701,13 +760,13 @@
         <div class=${"card kpi alert" + (s && !s.alerts_open ? " zero" : "")}>
           <div class="label">Offene Alerts</div>
           <div class="value">${s ? fmtNum(s.alerts_open) : "–"}</div>
-          <div class="hint">${s ? fmtNum(s.alerts_harmless) + " harmlose ausgeblendet" : ""}</div>
+          <div class="hint">${s ? T("{n} harmlose ausgeblendet", { n: fmtNum(s.alerts_harmless) }) : ""}</div>
         </div>
         <button class=${"card kpi kpi-btn" + (s && s.rep && (s.rep.malicious || s.rep.suspicious) ? " rep-bad" : "")}
           onClick=${() => goAlerts({ rep: "bad" })} title="Offene Alerts mit Blocklisten-Treffer anzeigen">
           <div class="label">Blocklisten-Treffer</div>
           <div class="value">${s && s.rep ? fmtNum((s.rep.malicious || 0) + (s.rep.suspicious || 0)) : "–"}</div>
-          <div class="hint">${s && s.rep ? fmtNum(s.rep.known || 0) + " zu bekannten Diensten" : ""}</div>
+          <div class="hint">${s && s.rep ? T("{n} zu bekannten Diensten", { n: fmtNum(s.rep.known || 0) }) : ""}</div>
         </button>
         <div class="card kpi">
           <div class="label">Neue Signaturen</div>
@@ -717,17 +776,17 @@
         <div class="card kpi">
           <div class="label">Blockiert</div>
           <div class="value">${s ? fmtNum(s.alerts_blocked) : "–"}</div>
-          <div class="hint">${s ? fmtNum(s.alerts_blocked_open) + " davon offen" : ""}</div>
+          <div class="hint">${s ? T("{n} davon offen", { n: fmtNum(s.alerts_blocked_open) }) : ""}</div>
         </div>
         <div class="card kpi">
           <div class="label">Verbindungen (Flows)</div>
           <div class="value">${s ? fmtNum(s.flows) : "–"}</div>
-          <div class="hint">${s ? fmtNum(s.clients) + " Quell-IPs" : ""}</div>
+          <div class="hint">${s ? T("{n} Quell-IPs", { n: fmtNum(s.clients) }) : ""}</div>
         </div>
         <div class="card kpi">
           <div class="label">Datenvolumen</div>
           <div class="value">${s ? fmtBytes(s.bytes) : "–"}</div>
-          <div class="hint">${s ? fmtNum(s.events) + " Events · " + rangeLabel : ""}</div>
+          <div class="hint">${s ? T("{n} Events", { n: fmtNum(s.events) }) + " · " + tr(rangeLabel) : ""}</div>
         </div>
       </div>
 
@@ -841,7 +900,7 @@
                   ${s.is_new && !s.harmless ? html` <span class="badge new">NEU</span>` : null}
                   ${s.verdict === "malicious" || s.verdict === "suspicious" ? html` <span class=${"rep " + s.verdict}>${VERDICTS[s.verdict].icon} ${VERDICTS[s.verdict].label}</span>` : null}
                   ${s.harmless ? html` <span class="badge harmless">harmlos</span>` : null}
-                  ${blockedBy[s.sid] ? html` <span class=${"badge " + (blockedBy[s.sid].enabled ? "blocked" : "harmless")} title=${"eigene Regel SID " + blockedBy[s.sid].sid}>${blockedBy[s.sid].enabled ? "eigene " + blockedBy[s.sid].action + "-Regel" : "eigene Regel deaktiviert"}</span>` : null}</div>
+                  ${blockedBy[s.sid] ? html` <span class=${"badge " + (blockedBy[s.sid].enabled ? "blocked" : "harmless")} title=${T("eigene Regel SID {n}", { n: blockedBy[s.sid].sid })}>${blockedBy[s.sid].enabled ? T("eigene {a}-Regel", { a: blockedBy[s.sid].action }) : "eigene Regel deaktiviert"}</span>` : null}</div>
                 <div class="cat"><button class="link" onClick=${() => goAlerts({ sid: s.sid })}>SID ${s.gid}:${s.sid}</button>${s.category ? " · " + s.category : ""}${s.note ? " · „" + s.note + "“" : ""}</div>
               </td>
               <td><${Severity} s=${s.severity} /></td>
@@ -985,7 +1044,7 @@
         ${data && !saved && html`
           <${RuleEnvWarnings} env=${env} />
           ${data.existing.length > 0 && html`<div class="warnmsg">Dazu gibt es schon eigene Regeln:
-            <ul>${data.existing.map((r) => html`<li key=${r.sid}>SID ${r.sid}: ${r.msg}${r.enabled ? "" : " (deaktiviert)"}</li>`)}</ul></div>`}
+            <ul>${data.existing.map((r) => html`<li key=${r.sid}>SID ${r.sid}: ${r.msg}${r.enabled ? "" : " " + T("(deaktiviert)")}</li>`)}</ul></div>`}
 
           <div class="field"><label>Was soll blockiert werden?</label>
             <div class="rule-kinds">${RULE_KINDS.map(([k, label, hint]) => {
@@ -993,7 +1052,7 @@
               return html`<label key=${k} class=${"rule-kind" + (kind === k ? " active" : "") + (off ? " off" : "")}>
                 <input type="radio" name="rk" checked=${kind === k} disabled=${off && k === "sig"} onChange=${() => setKind(k)} />
                 <span><b>${label}</b><br /><span class="cat">${k === "sig" && !data.original
-                  ? "Originalregel nicht gefunden in " + env.rules_dir + " (Ordner in den Einstellungen prüfen)" : hint}</span></span></label>`;
+                  ? T("Originalregel nicht gefunden in {x} (Ordner in den Einstellungen prüfen)", { x: env.rules_dir }) : hint}</span></span></label>`;
             })}</div></div>
 
           ${kind === "sig" && data.original && html`<div class="field"><label>Originalregel</label>
@@ -1061,12 +1120,12 @@
     const [showOther, setShowOther] = useState(false);
     useEffect(() => { if (data && data.reload && !reloadSt) setReloadSt(data.reload); }, [data]);
     const act = async (path, body, question) => {
-      if (question && !confirm(question)) return;
+      if (question && !confirm(tr(question))) return;
       setBusy(true);
       try {
         const r = await postJson(path, body);
         if (r.reload) setReloadSt(r.reload);
-      } catch (e) { alert(e.message); }
+      } catch (e) { alert(tr(e.message)); }
       setBusy(false);
       setReloadTick((t) => t + 1);
       onChanged && onChanged();
@@ -1093,11 +1152,11 @@
           <td class="nowrap">${r.created ? r.created.replace(/_/g, "-") : "–"}</td>
           <td class="nowrap">
             <button class="btn" disabled=${busy} onClick=${() => act("/api/rules/modify", { sid: r.sid, op: r.enabled ? "disable" : "enable" })}>${r.enabled ? "Deaktivieren" : "Aktivieren"}</button>${" "}
-            <button class="btn" disabled=${busy} onClick=${() => act("/api/rules/modify", { sid: r.sid, op: "delete" }, "Regel SID " + r.sid + " endgültig aus " + data.local_rules + " löschen?")}>Löschen</button></td>
+            <button class="btn" disabled=${busy} onClick=${() => act("/api/rules/modify", { sid: r.sid, op: "delete" }, T("Regel SID {sid} endgültig aus {f} löschen?", { sid: r.sid, f: data.local_rules }))}>Löschen</button></td>
         </tr>`)}</tbody>
       </table></div>`}
       ${other.length > 0 && html`<div style=${{ marginTop: 10 }}>
-        <button class="link" onClick=${() => setShowOther(!showOther)}>${showOther ? "▾" : "▸"} ${other.length} weitere Regel${other.length === 1 ? "" : "n"} in der Datei (von Hand angelegt, werden hier nicht verändert)</button>
+        <button class="link" onClick=${() => setShowOther(!showOther)}>${showOther ? "▾" : "▸"} ${T(other.length === 1 ? "1 weitere Regel in der Datei (von Hand angelegt, wird hier nicht verändert)" : "{n} weitere Regeln in der Datei (von Hand angelegt, werden hier nicht verändert)", { n: other.length })}</button>
         ${showOther && html`<pre class="json rule-text" style=${{ marginTop: 6 }}>${other.map((r) => (r.enabled ? "" : "# ") + r.text).join("\n")}</pre>`}</div>`}
     </div>`;
   }
@@ -1157,7 +1216,7 @@
   const SEV = { high: { label: "hoch", cls: "malicious" }, medium: { label: "mittel", cls: "suspicious" }, low: { label: "niedrig", cls: "unknown" } };
   const BYTE_METRICS = new Set(["bytes_out", "bytes_in"]);
   const fmtMetric = (m, v) => (BYTE_METRICS.has(m) ? fmtBytes(v) : fmtNum(Math.round(v || 0)));
-  const fmtDur = (sec) => { const d = Math.ceil(sec / 86400); return d <= 1 ? "1 Tag" : d + " Tage"; };
+  const fmtDur = (sec) => { const d = Math.ceil(sec / 86400); return d <= 1 ? T("1 Tag") : T("{n} Tage", { n: d }); };
 
   function DevLabel({ device, dev }) {
     const d = device || { dev, ips: [dev] };
@@ -1169,12 +1228,12 @@
 
   function anomalyExplain(a, labels) {
     const d = a.detail || {};
-    if (a.kind === "volume") return `${fmtMetric(a.metric, d.value)} in der Stunde ab ${fmtTime(d.hour)} · sonst höchstens ${fmtMetric(a.metric, d.max)}, meist ${fmtMetric(a.metric, d.median)}`;
-    if (a.kind === "time") return `${fmtNum(d.flows)} Verbindungen um ${d.hour_of_day} Uhr · in den letzten ${d.days} Tagen um diese Zeit an ${d.seen_days} Tag(en) aktiv`;
+    if (a.kind === "volume") return T("{v} in der Stunde ab {t} · sonst höchstens {max}, meist {med}", { v: fmtMetric(a.metric, d.value), t: fmtTime(d.hour), max: fmtMetric(a.metric, d.max), med: fmtMetric(a.metric, d.median) });
+    if (a.kind === "time") return T("{n} Verbindungen um {h} Uhr · in den letzten {d} Tagen um diese Zeit an {s} Tag(en) aktiv", { n: fmtNum(d.flows), h: d.hour_of_day, d: d.days, s: d.seen_days });
     if (a.kind === "new") {
       const cat = (labels && labels[a.metric]) || a.metric;
-      const what = d.total ? `${d.total} neue: ${(d.items || []).slice(0, 8).join(", ")}${d.total > 8 ? " …" : ""}` : (d.items || [a.item]).join(", ");
-      return `${what} · ${cat} bisher: ${fmtNum(d.known)}, zuletzt ca. ${String(d.rate).replace(".", ",")} neue pro Tag`;
+      const what = d.total ? T("{n} neue: {list}", { n: d.total, list: (d.items || []).slice(0, 8).join(", ") + (d.total > 8 ? " …" : "") }) : (d.items || [a.item]).join(", ");
+      return what + " · " + T("{cat} bisher: {n}, zuletzt ca. {r} neue pro Tag", { cat: tr(cat), n: fmtNum(d.known), r: LANG === "en" ? String(d.rate) : String(d.rate).replace(".", ",") });
     }
     return d.text || "";
   }
@@ -1205,18 +1264,18 @@
         ${error && html`<div class="err">${error}</div>`}
         ${!data ? html`<div class="empty">lädt …</div>` : html`
           <div class="cat">Beobachtet seit ${fmtDateTime(data.meta.first_seen)}, zuletzt aktiv ${fmtAgo(data.meta.last_seen)} · ${b.active_days} aktive Tage ·
-            ${b.learned ? html`<span class="check ok">wird überwacht</span>` : html`<b>lernt noch</b> (${b.learn_left > 0 ? "noch " + fmtDur(b.learn_left) : ""}${b.learn_left > 0 && b.need_active ? ", " : ""}${b.need_active ? "noch " + b.need_active + " aktive Tage" : ""})`}</div>
+            ${b.learned ? html`<span class="check ok">wird überwacht</span>` : html`<b>lernt noch</b> (${b.learn_left > 0 ? T("noch {x}", { x: fmtDur(b.learn_left) }) : ""}${b.learn_left > 0 && b.need_active ? ", " : ""}${b.need_active ? T("noch {n} aktive Tage", { n: b.need_active }) : ""})`}</div>
 
           <section class="rep-section">
             <h4>Wann ist das Gerät aktiv?</h4>
             <div class="cat">An wie vielen der letzten ${b.days} Tage das Gerät zur jeweiligen Uhrzeit aktiv war (≥ 10 Verbindungen pro Stunde)</div>
-            <${Bars} values=${b.hod} max=${Math.max(1, b.days)} labels=${b.hod.map((_, i) => (i % 3 === 0 ? i : ""))} title=${(i, v) => i + " Uhr: an " + v + " von " + b.days + " Tagen"} />
+            <${Bars} values=${b.hod} max=${Math.max(1, b.days)} labels=${b.hod.map((_, i) => (i % 3 === 0 ? i : ""))} title=${(i, v) => T("{h} Uhr: an {v} von {d} Tagen", { h: i, v, d: b.days })} />
           </section>
 
           <section class="rep-section">
             <h4>Letzte 48 Stunden</h4>
             <${Bars} cls="small" values=${data.recent.map((r) => r.flows)} labels=${data.recent.map((r) => { const h = new Date(r.hour * 1000).getHours(); return h % 6 === 0 ? h : ""; })}
-              title=${(i, v) => { const r = data.recent[i]; return fmtDateTime(r.hour) + ": " + fmtNum(r.flows) + " Verbindungen, " + fmtBytes(r.bytes_out) + " gesendet, " + r.peers_ext + " Gegenstellen"; }} />
+              title=${(i, v) => { const r = data.recent[i]; return fmtDateTime(r.hour) + ": " + T("{n} Verbindungen, {b} gesendet, {p} Gegenstellen", { n: fmtNum(r.flows), b: fmtBytes(r.bytes_out), p: r.peers_ext }); }} />
           </section>
 
           <section class="rep-section">
@@ -1233,7 +1292,7 @@
             <div class="grid cols-2 known-grid">${Object.keys(data.novelty_labels).map((k) => html`<div key=${k}>
               <div class="cat"><b>${data.novelty_labels[k]}</b> (${fmtNum(data.known[k + "_total"])})</div>
               <div class="hostnames">${data.known[k].length ? data.known[k].map((x) => html`<span key=${x.item} class="hn"
-                title=${"zuerst " + fmtDateTime(x.first_seen) + "\nzuletzt " + fmtDateTime(x.last_seen) + "\n" + fmtNum(x.count) + "×"}>${x.item}</span>`)
+                title=${T("zuerst {x}", { x: fmtDateTime(x.first_seen) }) + "\n" + T("zuletzt {x}", { x: fmtDateTime(x.last_seen) }) + "\n" + fmtNum(x.count) + "×"}>${x.item}</span>`)
                 : html`<span class="cat">–</span>`}</div></div>`)}</div>
           </section>
 
@@ -1251,8 +1310,8 @@
   }
 
   function muteLabel(m, data) {
-    const what = m.kind === "new" ? "Neues: " + ((data.novelty_labels || {})[m.metric] || m.metric)
-      : m.kind === "volume" ? "Menge: " + ((data.metric_labels || {})[m.metric] || m.metric) : "Ungewöhnliche Uhrzeit";
+    const what = m.kind === "new" ? T("Neues: {x}", { x: tr((data.novelty_labels || {})[m.metric] || m.metric) })
+      : m.kind === "volume" ? T("Menge: {x}", { x: tr((data.metric_labels || {})[m.metric] || m.metric) }) : T("Ungewöhnliche Uhrzeit");
     return what + (m.metric === "*" ? " (alle)" : "");
   }
 
@@ -1269,7 +1328,7 @@
     };
     const mute = (a) => {
       const what = a.kind === "new" ? "„" + a.title + "“" : a.kind === "volume" ? "„" + a.title + "“" : "Aktivität zu ungewöhnlicher Uhrzeit";
-      if (confirm(what + " für dieses Gerät nicht mehr melden? (Lässt sich im Geräteprofil rückgängig machen.)"))
+      if (confirm(T("„{x}“ für dieses Gerät nicht mehr melden? (Lässt sich im Geräteprofil rückgängig machen.)", { x: what })))
         act("/api/anomalies/mute", { dev: a.dev, kind: a.kind, metric: a.metric });
     };
     const learned = data ? data.devices.filter((d) => d.learned).length : 0;
@@ -1279,13 +1338,13 @@
           <div>
             <h2>Anomalien im Verhalten lokaler Geräte</h2>
             <div class="sub">Das Dashboard lernt für jedes Gerät, wie viel, wann und wohin es normalerweise kommuniziert, und warnt bei deutlichen Abweichungen.
-              ${data ? ` Lernphase: ${data.learning_days} Tage (mind. 3 aktive). ${learned} von ${data.devices.length} Geräten werden überwacht.` : ""}</div>
+              ${data ? " " + T("Lernphase: {d} Tage (mind. 3 aktive). {n} von {t} Geräten werden überwacht.", { d: data.learning_days, n: learned, t: data.devices.length }) : ""}</div>
           </div>
           <div class="seg">
             <button class=${status === "open" ? "active" : ""} onClick=${() => setStatus("open")}>offen</button>
             <button class=${status === "all" ? "active" : ""} onClick=${() => setStatus("all")}>alle (30 Tage)</button>
           </div>
-          ${isAdmin && data && data.items.some((a) => a.status === "open") && html`<button class="btn" onClick=${() => confirm("Alle offenen Warnungen als erledigt markieren?") && act("/api/anomalies/ack", { all: true })}>Alle erledigt</button>`}
+          ${isAdmin && data && data.items.some((a) => a.status === "open") && html`<button class="btn" onClick=${() => confirm(T("Alle offenen Warnungen als erledigt markieren?")) && act("/api/anomalies/ack", { all: true })}>Alle erledigt</button>`}
         </div>
         ${error && html`<div class="err">${error}</div>`}
         ${msg && html`<div class="err">${msg}</div>`}
@@ -1311,7 +1370,7 @@
           </table></div>`}
         ${data && html`<div class="cat" style=${{ marginTop: 10 }}>
           Neue Warnungen stehen auch im Log${data.notify ? " und werden per Benachrichtigung verschickt" : " (Benachrichtigung aufs Handy: anomaly_notify_url in config.json, siehe README)"}.
-          ${data.last_run ? " Letzte Prüfung " + fmtAgo(data.last_run) + "." : ""}
+          ${data.last_run ? " " + T("Letzte Prüfung {x}.", { x: fmtAgo(data.last_run) }) : ""}
           ${isAdmin && data.enabled ? html` <button class="link" onClick=${() => act("/api/anomalies/check", {})}>Jetzt prüfen</button>` : null}</div>`}
       </div>
 
@@ -1324,7 +1383,7 @@
           <tbody>${data.devices.map((d) => html`<tr key=${d.dev}>
             <td><button class="link" onClick=${() => setProfile(d.dev)}><${DevLabel} device=${d.device} dev=${d.dev} /></button></td>
             <td class="nowrap">${d.learned ? html`<span class="rep known">überwacht</span>`
-              : html`<span class="rep unknown" title=${(d.learn_left > 0 ? "noch " + fmtDur(d.learn_left) : "") + (d.need_active ? " · noch " + d.need_active + " aktive Tage" : "")}>lernt noch${d.learn_left > 0 ? " · " + fmtDur(d.learn_left) : ""}</span>`}</td>
+              : html`<span class="rep unknown" title=${(d.learn_left > 0 ? T("noch {x}", { x: fmtDur(d.learn_left) }) : "") + (d.need_active ? " · " + T("noch {n} aktive Tage", { n: d.need_active }) : "")}>lernt noch${d.learn_left > 0 ? " · " + fmtDur(d.learn_left) : ""}</span>`}</td>
             <td class="nowrap">${fmtDateTime(d.first_seen)}</td>
             <td class="num">${fmtBytes(d.stats.bytes_out.p99)}</td>
             <td class="num">${fmtNum(d.stats.flows.p99)}</td>
@@ -1477,7 +1536,7 @@ outputs:
                 ${a.verdict !== "unknown" && a.verdict !== "known" ? html`<${FpReasons} a=${a} />` : null}
               </td>
               <td>${moreList(a.clients, a.clients_total, (c) => html`<div key=${c.ip} class="nowrap"><span class="mono">${c.ip}</span> <${DevName} ip=${c.ip} /></div>`)}</td>
-              <td>${moreList(a.servers, a.servers_total, (x) => html`<div key=${x.server} class="fp-server" title=${fmtNum(x.count) + " Verbindungen"}>${x.server}</div>`)}</td>
+              <td>${moreList(a.servers, a.servers_total, (x) => html`<div key=${x.server} class="fp-server" title=${T("{n} Verbindungen", { n: fmtNum(x.count) })}>${x.server}</div>`)}</td>
               <td class="num">${fmtNum(a.conns)}</td>
               <td class="nowrap">${fmtDateTime(a.first_seen)}</td>
               <td class="nowrap">${fmtAgo(a.last_seen)}</td>
@@ -1552,7 +1611,7 @@ outputs:
       if (!k || !newName.trim()) return setMsg({ err: true, text: "Bitte MAC- oder IP-Adresse und Namen eingeben." });
       try {
         await saveDeviceName(MAC_INPUT_RE.test(k) ? "mac" : "ip", k, newName, { replace_ip_names: true });
-        setNewKey(""); setNewName(""); setMsg({ text: "„" + newName.trim() + "“ gespeichert." });
+        setNewKey(""); setNewName(""); setMsg({ text: T("„{x}“ gespeichert.", { x: newName.trim() }) });
         changed();
       } catch (err) { setMsg({ err: true, text: err.message }); }
     };
@@ -1589,7 +1648,7 @@ outputs:
             return html`<tr key=${d.kind + d.key}>
               <td class="dev-name">
                 <${NameEditor} kind=${d.kind} k=${d.key} value=${d.name} onSaved=${changed}
-                  placeholder=${ipName ? ipName + " (per IP)" : d.dhcp ? d.dhcp + " (DHCP)" : "Name vergeben …"}
+                  placeholder=${ipName ? ipName + " " + T("(per IP)") : d.dhcp ? d.dhcp + " (DHCP)" : T("Name vergeben …")}
                   extra=${d.kind === "mac" ? { replace_ip_names: true } : null} />
                 <div class="cat">${d.kind === "mac" ? "gilt für die MAC-Adresse" : "gilt für die IP-Adresse"}${d.dhcp && d.name ? " · DHCP: " + d.dhcp : ""}</div>
                 ${d.ip_names && Object.entries(d.ip_names).map(([ip, n]) => html`<div key=${ip} class="cat dev-oldname">
@@ -1608,7 +1667,7 @@ outputs:
                 ${more.length > 0 && html`<div class="cat mono dev-more">${more.join(", ")}${d.ips.length > 4 ? " +" + (d.ips.length - 4) : ""}</div>`}
               </td>
               <td class="nowrap" title=${fmtDateTime(d.last_seen)}>${d.last_seen ? fmtAgo(d.last_seen) : "–"}</td>
-              <td>${shown && d.name ? html`<button class="icon-btn" title=${"Namen „" + d.name + "“ entfernen"} onClick=${() => remove(d)}>✕</button>` : null}</td>
+              <td>${shown && d.name ? html`<button class="icon-btn" title=${T("Namen „{x}“ entfernen", { x: d.name })} onClick=${() => remove(d)}>✕</button>` : null}</td>
             </tr>`;
           })}</tbody>
         </table></div>`}
@@ -1633,7 +1692,7 @@ outputs:
     const { data: s, error } = useApi("/api/status", [tick]);
     const { data: et } = useApi("/api/event_types?hours=24", [tick]);
     const file = (f) => f && html`<dd>${f.path}<br/>
-      <span class="cat">gelesen ${fmtBytes(f.offset)} von ${fmtBytes(f.size)}${f.error ? " · Fehler: " + f.error : ""}${f.used === false ? " · nicht verwendet (alert_source=eve)" : ""}</span></dd>`;
+      <span class="cat">gelesen ${fmtBytes(f.offset)} von ${fmtBytes(f.size)}${f.error ? " · " + T("Fehler: {x}", { x: f.error }) : ""}${f.used === false ? " · nicht verwendet (alert_source=eve)" : ""}</span></dd>`;
     return html`<div class="grid cols-2">
       <div class="card">
         <h2>Einlesen</h2><div class="sub">Zustand des Hintergrund-Prozesses</div>
@@ -1752,12 +1811,12 @@ outputs:
             <td class="nowrap">${KIND_LABEL[f.kind] || f.kind}${f.category && ["ip", "domain", "ja3", "ja4"].includes(f.kind) ? html`<div class="cat">${CAT_LABEL[f.category] || f.category}</div>` : null}</td>
             <td class="num">${f.entries != null ? fmtNum(f.entries) : "–"}</td>
             <td class="nowrap">${f.updating ? "lädt …" : f.queued ? "in Warteschlange" : f.last_success ? fmtAgo(f.last_success) : "noch nie"}
-              <div class="cat">alle ${f.interval_h >= 48 ? Math.round(f.interval_h / 24) + " Tage" : f.interval_h + " Std"}</div></td>
+              <div class="cat">${T("alle {x}", { x: f.interval_h >= 48 ? T("{n} Tage", { n: Math.round(f.interval_h / 24) }) : T("{n} Std", { n: f.interval_h }) })}</div></td>
             <td><button class="btn" disabled=${!f.enabled || f.updating || f.queued} onClick=${() => post("/api/intel/update", { id: f.id })}>aktualisieren</button></td>
           </tr>`)}</tbody>
         </table></div>
         <div class="cat" style=${{ marginTop: 12 }}>
-          Hostnamen-Zuordnung: ${fmtNum(s.ip_names.n)} IP/Name-Paare für ${fmtNum(s.ip_names.ips)} IPs aus DNS-Antworten, TLS-SNI und HTTP-Host${s.ip_names.since ? " (seit " + fmtDateTime(s.ip_names.since) + ")" : ""}.
+          ${T("Hostnamen-Zuordnung: {n} IP/Name-Paare für {i} IPs aus DNS-Antworten, TLS-SNI und HTTP-Host", { n: fmtNum(s.ip_names.n), i: fmtNum(s.ip_names.ips) })}${s.ip_names.since ? " " + T("(seit {x})", { x: fmtDateTime(s.ip_names.since) }) : ""}.
           Darüber werden Domain-Listen und ${fmtNum(s.trusted_domains)} bekannte Update-/Systemdienste (z. B. Windows Update, Apple, Debian) einer IP zugeordnet.
           Eigene vertrauenswürdige Domains und Feeds lassen sich in <span class="mono">config.json</span> eintragen (<span class="mono">trusted_domains</span>, <span class="mono">custom_feeds</span>).
         </div>`}
@@ -1798,7 +1857,7 @@ outputs:
     const set = (k) => (e) => { setF({ ...f, [k]: e.target.value }); setErr(null); };
     const submit = async (e) => {
       e.preventDefault();
-      if (f.neu.length < min) return setErr("Das neue Passwort muss mindestens " + min + " Zeichen lang sein.");
+      if (f.neu.length < min) return setErr(T("Das neue Passwort muss mindestens {n} Zeichen lang sein.", { n: min }));
       if (f.neu !== f.rep) return setErr("Die beiden neuen Passwörter stimmen nicht überein.");
       setBusy(true);
       try { await postJson("/api/me/password", { old: f.old, new: f.neu }); onDone(); }
@@ -1857,7 +1916,7 @@ outputs:
     const [err, setErr] = useState(null);
     const submit = async (e) => {
       e.preventDefault();
-      if (pw.length < min) return setErr("Mindestens " + min + " Zeichen.");
+      if (pw.length < min) return setErr(T("Mindestens {n} Zeichen.", { n: min }));
       try { onSaved(await postJson("/api/users", { op: "password", username: user, password: pw, must_change: must })); }
       catch (x) { setErr(x.message); }
     };
@@ -1893,7 +1952,7 @@ outputs:
     };
     const submitAdd = async (e) => {
       e.preventDefault();
-      if (await run({ op: "add", ...add }, "Benutzer „" + add.username + "“ angelegt.")) setAdd(empty);
+      if (await run({ op: "add", ...add }, T("Benutzer „{x}“ angelegt.", { x: add.username }))) setAdd(empty);
     };
     if (!data) return html`<div class="card settings">${msg ? html`<div class="err">${msg.text}</div>` : html`<div class="empty">lädt …</div>`}</div>`;
     const self = (u) => u.username.toLowerCase() === me.username.toLowerCase();
@@ -1912,8 +1971,8 @@ outputs:
           <td class="num">${u.sessions}</td>
           <td><div class="row-actions">${!self(u) && html`
             <button class="btn" onClick=${() => setPwFor(u.username)}>Passwort …</button>
-            ${u.sessions > 0 && html`<button class="btn" onClick=${() => run({ op: "logout", username: u.username }, u.username + " wurde abgemeldet.")}>Abmelden</button>`}
-            <button class="btn danger" onClick=${() => confirm("Benutzer „" + u.username + "“ wirklich löschen?") && run({ op: "delete", username: u.username }, "Benutzer gelöscht.")}>Löschen</button>`}
+            ${u.sessions > 0 && html`<button class="btn" onClick=${() => run({ op: "logout", username: u.username }, T("{x} wurde abgemeldet.", { x: u.username }))}>Abmelden</button>`}
+            <button class="btn danger" onClick=${() => confirm(T("Benutzer „{x}“ wirklich löschen?", { x: u.username })) && run({ op: "delete", username: u.username }, "Benutzer gelöscht.")}>Löschen</button>`}
           </div></td>
         </tr>`)}</tbody>
       </table></div>
@@ -1936,7 +1995,7 @@ outputs:
       ${msg && html`<div class=${msg.err ? "err" : "okmsg"} style=${{ marginTop: 10 }}>${msg.text}</div>`}
       <div class="cat" style=${{ marginTop: 12 }}>Passwort vergessen? Auf dem Pi: <span class="mono">sudo ./users.sh passwd admin</span></div>
       ${pwFor && html`<${SetPasswordModal} user=${pwFor} min=${data.min_password} onClose=${() => setPwFor(null)}
-        onSaved=${(d) => { setData(d); setMsg({ err: false, text: "Passwort für " + pwFor + " gesetzt." }); setPwFor(null); }} />`}
+        onSaved=${(d) => { setData(d); setMsg({ err: false, text: T("Passwort für {x} gesetzt.", { x: pwFor }) }); setPwFor(null); }} />`}
     </div>`;
   }
 
@@ -1958,7 +2017,7 @@ outputs:
       try {
         const r = await postJson("/api/https", { ...form, https_port: Number(form.https_port), ...(extra || {}) });
         const url = r.scheme + "://" + location.hostname + ":" + r.port + "/";
-        setMsg({ err: false, text: "Gespeichert. Das Dashboard startet neu und ist gleich unter " + url + " erreichbar …" });
+        setMsg({ err: false, text: T("Gespeichert. Das Dashboard startet neu und ist gleich unter {x} erreichbar …", { x: url }) });
         setTimeout(() => { window.location.href = url; }, 4000);
       } catch (e) { setMsg({ err: true, text: e.message }); setBusy(false); }
     };
@@ -1974,7 +2033,7 @@ outputs:
         ${st.error && html`<dt>Fehler</dt><dd class="check bad">${st.error}</dd>`}
         ${c && !c.error && html`
           <dt>Zertifikat</dt><dd>${c.self_signed ? "selbstsigniert" : c.issuer}${c.names ? html` <span class="cat">· gilt für ${c.names.join(", ")}</span>` : null}</dd>
-          <dt>Gültig bis</dt><dd>${c.not_after ? fmtDateTime(c.not_after) : "–"}${daysLeft != null && daysLeft < 30 ? html` <span class="check bad">(${daysLeft < 0 ? "abgelaufen" : "noch " + daysLeft + " Tage"})</span>` : null}</dd>
+          <dt>Gültig bis</dt><dd>${c.not_after ? fmtDateTime(c.not_after) : "–"}${daysLeft != null && daysLeft < 30 ? html` <span class="check bad">(${daysLeft < 0 ? T("abgelaufen") : T("noch {n} Tage", { n: daysLeft })})</span>` : null}</dd>
           <dt>SHA-256</dt><dd class="mono" style=${{ fontSize: 11 }}>${c.fingerprint}</dd>`}
         ${c && c.error && html`<dt>Zertifikat</dt><dd class="check bad">${c.error}</dd>`}
         <dt>Dateien</dt><dd class="mono" style=${{ fontSize: 12 }}>${st.cert_path}<br />${st.key_path}</dd>
@@ -1993,7 +2052,7 @@ outputs:
       ${msg && html`<div class=${msg.err ? "err" : "okmsg"} style=${{ marginTop: 10 }}>${msg.text}</div>`}
       <div class="actions">
         ${st.active && c && c.self_signed && html`<button class="btn" disabled=${busy}
-          onClick=${() => confirm("Neues selbstsigniertes Zertifikat erzeugen (z. B. nach IP-Wechsel)? Der Browser warnt danach erneut.") && save({ regenerate: true })}>Zertifikat neu erzeugen</button>`}
+          onClick=${() => confirm(T("Neues selbstsigniertes Zertifikat erzeugen (z. B. nach IP-Wechsel)? Der Browser warnt danach erneut.")) && save({ regenerate: true })}>Zertifikat neu erzeugen</button>`}
         <button class="btn primary" disabled=${busy || !changed} onClick=${() => save()}>Speichern und neu starten</button>
       </div>
     </div>`;
@@ -2089,7 +2148,7 @@ outputs:
     const count = (k) => Array.isArray(doc[k]) ? doc[k].length : Object.keys(doc[k] || {}).length;
     const toggle = (k) => setSel(sel.includes(k) ? sel.filter((x) => x !== k) : [...sel, k]);
     const run = async () => {
-      if (mode === "replace" && !confirm("Vorhandene Einträge der gewählten Bereiche werden zuerst gelöscht. Fortfahren?")) return;
+      if (mode === "replace" && !confirm(T("Vorhandene Einträge der gewählten Bereiche werden zuerst gelöscht. Fortfahren?"))) return;
       setBusy(true); setErr(null);
       try {
         const r = await postJson("/api/userdata/import", { data: doc, sections: sel, mode });
@@ -2150,8 +2209,8 @@ outputs:
         try {
           const doc = JSON.parse(r.result);
           if (!doc || doc.format !== "suricata-dashboard-userdata") throw new Error("Keine Export-Datei des Suricata Dashboards.");
-          setMsg(null); setPreview({ doc, source: "Datei: " + f.name });
-        } catch (x) { setMsg({ err: true, text: "Datei nicht lesbar: " + x.message }); }
+          setMsg(null); setPreview({ doc, source: T("Datei: {x}", { x: f.name }) });
+        } catch (x) { setMsg({ err: true, text: T("Datei nicht lesbar: {x}", { x: x.message }) }); }
       };
       r.readAsText(f);
     };
@@ -2163,7 +2222,7 @@ outputs:
       try {
         const r = await postJson("/api/userdata/backup_now", {});
         setInfo(r);
-        setMsg({ err: false, text: r.written ? "Sicherung " + r.written + " angelegt." : "Keine Änderungen seit der letzten Sicherung." });
+        setMsg({ err: false, text: r.written ? T("Sicherung {x} angelegt.", { x: r.written }) : T("Keine Änderungen seit der letzten Sicherung.") });
       } catch (x) { setMsg({ err: true, text: x.message }); }
     };
     useEffect(() => {  // vom Hinweis-Banner aus "Wiederherstellen" geklickt
@@ -2499,7 +2558,7 @@ outputs:
         lines.push([trunc(nodeTitle(d), 30), dev ? "600 12px" : "500 11px", c.text]);
         if (n.alertSig) lines.push(["⚠ " + trunc(n.alertSig, 38), "600 11px", c.alert]);
         let sub = "";
-        if (dev) sub = d.name ? d.id : (d.hidden ? "+" + d.hidden + " weitere" : "");
+        if (dev) sub = d.name ? d.id : (d.hidden ? T("+{n} weitere", { n: d.hidden }) : "");
         else {
           const svc = n.svc;
           const rep = d.rep && d.rep.verdict !== "unknown" && d.rep.verdict !== "local" ? repText(d.rep) : (d.rep && d.rep.asn) || "";
@@ -2671,7 +2730,7 @@ outputs:
         const own = node.name_source === "mac" || node.name_source === "ip";
         return html`<div class="live-name">
           <${NameEditor} kind=${byMac ? "mac" : "ip"} k=${byMac ? node.mac : node.id} value=${own ? node.name : ""}
-            placeholder=${node.name ? node.name + " (DHCP)" : "Name vergeben …"} onSaved=${reload}
+            placeholder=${node.name ? node.name + " (DHCP)" : T("Name vergeben …")} onSaved=${reload}
             extra=${byMac ? { replace_ip_names: true } : null} />
           <div class="cat">${byMac ? "Der Name gilt für diese MAC-Adresse, auch wenn sich die IP ändert." : node.shared ? "Geteilte MAC (Router?) – der Name gilt für diese IP." : "Keine MAC bekannt – der Name gilt für diese IP."}</div>
         </div>`;
@@ -2682,7 +2741,7 @@ outputs:
       ${alerts.length > 0 && html`<div class="live-alerts">${alerts.map((a, i) => html`
         <div key=${i} class="live-alert"><b>⚠ ${a.signature}</b>
           <div class="cat">SID ${a.sid} · Schwere ${a.severity} · ${a.count}× · ${a.action}${dev ? " · " + nodeTitle(snap.nodes.find((n) => n.id === a.e.peer)) : ""}</div></div>`)}</div>`}
-      <div class="cat live-sum">${edges.length} ${edges.length === 1 ? "Verbindung" : "Verbindungen"}${totalBytes ? " · " + fmtBytes(totalBytes) + " (beendete Flows)" : ""}${node.hidden ? " · +" + node.hidden + " weitere nicht angezeigt" : ""}</div>
+      <div class="cat live-sum">${edges.length} ${edges.length === 1 ? "Verbindung" : "Verbindungen"}${totalBytes ? " · " + T("{b} (beendete Flows)", { b: fmtBytes(totalBytes) }) : ""}${node.hidden ? " · " + T("+{n} weitere nicht angezeigt", { n: node.hidden }) : ""}</div>
       <div class="live-conns">${edges.map((e) => {
         const other = snap.nodes.find((n) => n.id === (e.device === id ? e.peer : e.device));
         const arrow = e.dir === "in" ? (e.device === id ? "←" : "→") : (e.device === id ? "→" : "←");
@@ -2888,6 +2947,7 @@ outputs:
             <button key=${r.h} class=${hours === r.h ? "active" : ""} onClick=${() => setHours(r.h)}>${r.label}</button>`)}</div>`}
           <button class="icon-btn" title="Aktualisieren" onClick=${refresh}>⟳</button>
           <button class="icon-btn" title="Hell/Dunkel umschalten" onClick=${cycleTheme}>◐</button>
+          <button class="icon-btn lang-btn" title=${LANG === "de" ? "Switch to English" : "Auf Deutsch umschalten"} onClick=${() => setLang(LANG === "de" ? "en" : "de")}>${LANG === "de" ? "EN" : "DE"}</button>
           ${me.auth_enabled && html`<${UserMenu} me=${me} onPassword=${() => setPwOpen(true)} />`}
         </div>
       </div></header>
@@ -2908,7 +2968,7 @@ outputs:
           ${" " + [["device_names", "Gerätename", "Gerätenamen"], ["flags", "markierte Signatur", "markierte Signaturen"],
             ["fp_notes", "Fingerprint-Notiz", "Fingerprint-Notizen"], ["feeds", "Feed-Einstellung", "Feed-Einstellungen"]]
             .filter(([k]) => status.restore_hint.counts[k])
-            .map(([k, one, many]) => { const n = status.restore_hint.counts[k]; return n + " " + (n === 1 ? one : many); }).join(", ")}.
+            .map(([k, one, many]) => { const n = status.restore_hint.counts[k]; return n + " " + tr(n === 1 ? one : many); }).join(", ")}.
           <button class="btn primary" style=${{ marginLeft: 10 }} onClick=${() => { setRestoreReq(status.restore_hint.name); setTab("settings"); }}>Wiederherstellen …</button>
         </div>`}
         ${!me.auth_enabled && html`<div class="err">Die Anmeldung ist abgeschaltet (<span class="mono">"auth": false</span> in config.json) – jeder im Netz hat vollen Zugriff.</div>`}
