@@ -475,3 +475,20 @@ details > summary { cursor: pointer; }
 .lang-btn { font-size: 12px; font-weight: 600; min-width: 34px; }
 .login-top { display: flex; justify-content: space-between; align-items: flex-start; }
 .login-top .brand { margin-bottom: 14px; }
+
+/* Aktions-Buttons in Tabellenzeilen: umbrechen statt abschneiden */
+td.actions-cell { width: 1%; }
+.row-actions { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; min-width: 92px; }
+.row-actions .btn { white-space: nowrap; }
+
+/* Harmlos mit Kontext */
+.modal.flag-modal { width: 640px; max-height: calc(100vh - 32px); overflow-y: auto; }
+.flag-modal .rule-kinds { margin-bottom: 4px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip-btn { border: 1px solid var(--border); background: var(--surface); border-radius: 14px; padding: 3px 10px;
+  font-size: 12px; cursor: pointer; color: var(--text); }
+.chip-btn.active { border-color: var(--accent); background: var(--surface-2); font-weight: 600; }
+.field input[type=text].mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; }
+.preview-count { margin-top: 8px; font-weight: 600; color: var(--text-2); }
+td.endpoints { min-width: 150px; }
+td.ts-cell { min-width: 82px; }

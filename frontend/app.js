@@ -68,7 +68,7 @@
     { h: 168, label: "7 Tage" }, { h: 720, label: "30 Tage" },
   ];
   const REFRESH_MS = 30000;
-  const FRONTEND_VERSION = "1.11.0";
+  const FRONTEND_VERSION = "1.12.0";
 
   async function api(path, opts) {
     const r = await fetch(path, { credentials: "same-origin", ...(opts || {}) });
@@ -425,7 +425,7 @@
   function RepBadge({ r, withName }) {
     if (!r || r.verdict === "local") return null;
     const v = VERDICTS[r.verdict] || VERDICTS.unknown;
-    const title = [tr(v.label).toUpperCase(), r.name ? T("Hostname: {x}", { x: r.name }) : null, ...(r.reasons || [])].filter(Boolean).join("\n");
+    const title = [tr(v.label).toUpperCase(), r.name ? T("Hostname: {x}", { x: r.name }) : null, ...(r.reasons || []).map(tr)].filter(Boolean).join("\n");
     const extra = withName && r.verdict !== "popular" && r.name ? r.name : null;
     return html`<span class="rep-wrap" title=${title}>
       <span class=${"rep " + r.verdict}>${v.icon ? v.icon + " " : ""}${repText(r)}</span>
@@ -452,24 +452,24 @@
       </tr></thead>
       <tbody>${items.map((a) => html`
         <tr key=${a.id} class=${(a.harmless ? "harmless " : "") + (a.is_new && !a.harmless ? "is-new" : "")}>
-          <td class="nowrap">${fmtDateTime(a.ts)}</td>
+          <td class="ts-cell">${fmtDateTime(a.ts)}</td>
           <td><${ActionBadge} a=${a.action} /></td>
           <td><${Severity} s=${a.severity} /></td>
           <td>
             <div class="sig"><button class="link sig-link" title="Details und eve.json-Kontext" onClick=${() => setDetail(a)}>${a.signature}</button>
               ${a.is_new && !a.harmless ? html` <span class="badge new">NEU</span>` : null}
-              ${a.harmless ? html` <span class="badge harmless">harmlos</span>` : null}</div>
+              ${a.harmless ? html` <span class="badge harmless" title=${!a.sig_flag && a.ctx_desc ? tr(a.ctx_desc) : ""}>${!a.sig_flag && a.ctx_flag ? "harmlos (Kontext)" : "harmlos"}</span>` : null}</div>
             <div class="cat">${onSid ? html`<button class="link" onClick=${() => onSid(a.sid)}>SID ${a.gid}:${a.sid}</button>` : `SID ${a.gid}:${a.sid}`}${a.category ? " · " + a.category : ""}</div>
           </td>
-          <td class="nowrap"><${Endpoint} ip=${a.src_ip} port=${a.src_port} onIp=${onIp} /> → <${Endpoint} ip=${a.dest_ip} port=${a.dest_port} onIp=${onIp} /></td>
+          <td class="endpoints"><span class="nowrap"><${Endpoint} ip=${a.src_ip} port=${a.src_port} onIp=${onIp} /></span> <span class="nowrap">→ <${Endpoint} ip=${a.dest_ip} port=${a.dest_port} onIp=${onIp} /></span></td>
           <td><${RepCell} rep=${a.rep} /></td>
           ${!compact && html`<td>${a.proto}${a.app_proto ? "/" + a.app_proto : ""}</td>`}
-          <td class="nowrap">
-            <button class="btn" onClick=${() => setDetail(a)}>Details</button>${" "}
+          <td class="actions-cell"><div class="row-actions">
+            <button class="btn" onClick=${() => setDetail(a)}>Details</button>
             ${a.harmless
-              ? html`<button class="btn" onClick=${() => onUnflag(a)}>Markierung aufheben</button>`
+              ? html`<button class="btn" title=${!a.sig_flag && a.ctx_desc ? tr(a.ctx_desc) : ""} onClick=${() => onUnflag(a)}>${!a.sig_flag && a.ctx_flag ? "Kontext-Regel aufheben" : "Markierung aufheben"}</button>`
               : html`<button class="btn" onClick=${() => onFlag(a)}>Harmlos</button>`}
-            ${isAdmin && html` <button class="btn" title="drop/reject-Regel in local.rules anlegen" onClick=${() => openRule({ alertId: a.id })}>Sperren …</button>`}</td>
+            ${isAdmin && html`<button class="btn" title="drop/reject-Regel in local.rules anlegen" onClick=${() => openRule({ alertId: a.id })}>Sperren …</button>`}</div></td>
         </tr>`)}</tbody>
     </table></div>
     ${detail && html`<${AlertDetail} alert=${detail} onClose=${() => setDetail(null)}
@@ -705,28 +705,91 @@
     </div>`;
   }
 
+  const CTX_KINDS = [["service", "Bekannter Dienst"], ["asn", "Netzbetreiber"], ["domain", "Domain"], ["cidr", "IP / Netz"]];
+  const uniq = (a) => a.filter((x, i) => x != null && x !== "" && a.indexOf(x) === i);
+
   function FlagDialog({ target, onClose, onDone }) {
+    const q = target.id ? "alert_id=" + target.id : `gid=${target.gid}&sid=${target.sid}`;
+    const { data, error } = useApi("/api/flags/suggest?" + q);
+    const [scope, setScope] = useState("all");
+    const [kind, setKind] = useState("service");
+    const [value, setValue] = useState("");
     const [note, setNote] = useState("");
     const [busy, setBusy] = useState(false);
-    if (!target) return null;
+    const [preview, setPreview] = useState(null);
+    const peers = data ? data.peers.filter((p) => p.global) : [];
+    const sugg = data ? {
+      service: ["*", ...uniq(peers.flatMap((p) => p.services))],
+      asn: uniq(peers.filter((p) => p.asn).map((p) => String(p.asn.asn))),
+      domain: uniq(peers.flatMap((p) => p.domains)),
+      cidr: uniq(data.peers.map((p) => p.ip)),
+    } : null;
+    const asnName = (n) => { const p = peers.find((x) => x.asn && String(x.asn.asn) === n); return p ? p.asn.name : ""; };
+    // sinnvolle Vorauswahl: Dienst > Netzbetreiber > Domain > Adresse
+    useEffect(() => {
+      if (!sugg) return;
+      const k = sugg.service.length > 1 ? "service" : sugg.asn.length ? "asn" : sugg.domain.length ? "domain" : "cidr";
+      setKind(k);
+      setValue(k === "service" ? sugg.service[1] : (sugg[k][0] || ""));
+    }, [data]);
+    const pickKind = (k) => { setKind(k); setValue(k === "service" ? (sugg.service[1] || "*") : (sugg[k][0] || "")); };
+    useEffect(() => {
+      if (scope !== "ctx" || !value) { setPreview(null); return; }
+      const t = setTimeout(() => postJson("/api/flags/preview", { gid: target.gid, sid: target.sid, kind, value })
+        .then(setPreview).catch((e) => setPreview({ error: e.message })), 300);
+      return () => clearTimeout(t);
+    }, [scope, kind, value]);
     const save = async () => {
       setBusy(true);
       try {
-        await api("/api/flags", { method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ gid: target.gid, sid: target.sid, note }) });
+        await postJson("/api/flags", { gid: target.gid, sid: target.sid, note, ...(scope === "ctx" ? { kind, value } : {}) });
         onDone();
       } catch (e) { alert(tr(e.message)); setBusy(false); }
     };
+    const chips = (list, label) => html`<div class="chips">${list.map((v) => html`
+      <button key=${v} type="button" class=${"chip-btn" + (v === value ? " active" : "")} onClick=${() => setValue(v)}>${label ? label(v) : v}</button>`)}</div>`;
     return html`<div class="modal-bg" onClick=${(e) => e.target === e.currentTarget && onClose()}>
-      <div class="modal" role="dialog" aria-modal="true">
-        <h3>Signatur als harmlos markieren</h3>
+      <div class="modal flag-modal" role="dialog" aria-modal="true" aria-label="Als harmlos markieren">
+        <h3>Als harmlos markieren</h3>
         <p><b>${target.signature}</b><br/>SID ${target.gid}:${target.sid}</p>
-        <p>Alle bisherigen und künftigen Alerts dieser Signatur werden in den Standardansichten ausgeblendet. Die Markierung lässt sich jederzeit aufheben.</p>
+        ${error && html`<div class="err">${error}</div>`}
+        <div class="rule-kinds">
+          <label class=${"rule-kind" + (scope === "all" ? " active" : "")}>
+            <input type="radio" name="fscope" checked=${scope === "all"} onChange=${() => setScope("all")} />
+            <span><b>Ganze Signatur</b><br /><span class="cat">Alle bisherigen und künftigen Alerts dieser Signatur werden in den Standardansichten ausgeblendet.</span></span></label>
+          <label class=${"rule-kind" + (scope === "ctx" ? " active" : "")}>
+            <input type="radio" name="fscope" checked=${scope === "ctx"} onChange=${() => setScope("ctx")} />
+            <span><b>Nur in diesem Zusammenhang</b><br /><span class="cat">Harmlos nur, wenn die Gegenstelle zu einem bestimmten Dienst, Netz oder einer Domain gehört. Bei anderen Adressen wirst du weiter gewarnt.</span></span></label>
+        </div>
+        ${scope === "ctx" && !data && !error && html`<div class="empty">lädt …</div>`}
+        ${scope === "ctx" && sugg && html`
+          <div class="field"><label>Bedingung für die Gegenstelle</label>
+            <div class="seg">${CTX_KINDS.map(([k, l]) => html`<button key=${k} type="button" class=${kind === k ? "active" : ""} onClick=${() => pickKind(k)}>${l}</button>`)}</div></div>
+          ${kind === "service" && html`<div class="field">
+            ${chips(sugg.service, (v) => (v === "*" ? T("jeder bekannte Update-/Systemdienst") : v))}
+            ${sugg.service.length < 2 && html`<div class="cat">Für die beteiligten Adressen wurde kein bekannter Dienst erkannt.</div>`}
+            <div class="cat">Bekannte Dienste erkennt das Dashboard am Hostnamen der Gegenstelle (z. B. Windows Update, Microsoft, Apple, Debian).</div></div>`}
+          ${kind === "asn" && html`<div class="field">
+            ${sugg.asn.length ? chips(sugg.asn, (v) => "AS" + v + (asnName(v) ? " " + asnName(v) : "")) : null}
+            <input type="text" class="mono" value=${value} onInput=${(e) => setValue(e.target.value.trim())} placeholder="z. B. 8075" />
+            <div class="cat">Das Netz eines Betreibers, z. B. AS8075 Microsoft. Braucht den Feed „IP → Netzbetreiber“.</div></div>`}
+          ${kind === "domain" && html`<div class="field">
+            ${sugg.domain.length ? chips(sugg.domain) : null}
+            <input type="text" class="mono" value=${value} onInput=${(e) => setValue(e.target.value.trim())} placeholder="z. B. microsoft.com" />
+            <div class="cat">Trifft zu, wenn ein Hostname der Gegenstelle diese Domain oder eine Subdomain ist (aus DNS, TLS-SNI, HTTP).</div></div>`}
+          ${kind === "cidr" && html`<div class="field">
+            ${chips(sugg.cidr)}
+            <input type="text" class="mono" value=${value} onInput=${(e) => setValue(e.target.value.trim())} placeholder="z. B. 13.107.0.0/16 oder 192.168.1.20" />
+            <div class="cat">Eine Adresse oder ein Netz in CIDR-Schreibweise. Gilt für Quelle und Ziel, auch für lokale Geräte.</div></div>`}
+          <div class="okmsg">Gilt nie, wenn eine der Adressen auf einer Blockliste steht oder als auffällig gilt – solche Alerts bleiben immer sichtbar.</div>
+          ${preview && (preview.error ? html`<div class="err">${tr(preview.error)}</div>`
+            : html`<div class="cat preview-count">${T("Würde {m} von {t} Alerts dieser Signatur der letzten 30 Tage ausblenden.", { m: fmtNum(preview.matched), t: fmtNum(preview.total) })}</div>`)}
+          ${data.rules.length > 0 && html`<div class="cat">Bestehende Regeln: ${data.rules.map((r) => tr(r.desc)).join(" · ")}</div>`}`}
         <textarea placeholder="Notiz, z. B. „apt-Updates vom Laptop“ oder „Discord-Voice“" value=${note}
-          onInput=${(e) => setNote(e.target.value)} autoFocus></textarea>
+          onInput=${(e) => setNote(e.target.value)}></textarea>
         <div class="actions">
           <button class="btn" onClick=${onClose}>Abbrechen</button>
-          <button class="btn primary" disabled=${busy} onClick=${save}>Als harmlos markieren</button>
+          <button class="btn primary" disabled=${busy || (scope === "ctx" && (!value || !preview || !!preview.error))} onClick=${save}>Als harmlos markieren</button>
         </div>
       </div>
     </div>`;
@@ -736,13 +799,16 @@
   function useFlagging(refresh) {
     const [target, setTarget] = useState(null);
     const unflag = async (a) => {
-      try { await api(`/api/flags?gid=${a.gid}&sid=${a.sid}`, { method: "DELETE" }); }
+      // Alert, der nur durch eine Kontext-Regel harmlos ist -> diese Regel aufheben
+      const rule = a.rule_id || (!a.sig_flag && a.ctx_flag);
+      if (rule && !a.rule_id && !confirm(T("Kontext-Regel „{x}“ für diese Signatur aufheben?", { x: tr(a.ctx_desc || "") }))) return;
+      try { await api(rule ? `/api/flags?rule=${rule}` : `/api/flags?gid=${a.gid}&sid=${a.sid}`, { method: "DELETE" }); }
       catch (e) { alert(tr(e.message)); }
       refresh();
     };
     // Nur einbinden, solange der Dialog offen ist, und pro Signatur neu (key):
     // so startet jeder Aufruf mit leerem Notizfeld und nicht "busy" vom letzten Speichern
-    const dialog = target ? html`<${FlagDialog} key=${target.gid + ":" + target.sid} target=${target}
+    const dialog = target ? html`<${FlagDialog} key=${target.gid + ":" + target.sid + ":" + (target.id || "")} target=${target}
       onClose=${() => setTarget(null)} onDone=${() => { setTarget(null); refresh(); }} />` : null;
     return { flag: setTarget, unflag, dialog };
   }
@@ -874,6 +940,7 @@
     const [rulesTick, setRulesTick] = useState(0);
     const { data, error } = useApi(`/api/signatures?hours=${hours}&include_harmless=${showHarmless ? 1 : 0}`, [tick]);
     const { data: flags } = useApi("/api/flags", [tick]);
+    const { data: ctxRules } = useApi("/api/flags/rules", [tick]);
     const { data: ownRules } = useApi(isAdmin ? "/api/rules" : null, [tick, rulesTick]);
     const { flag, unflag, dialog } = useFlagging(refresh);
     const { openRule, ruleDialog } = useRuleDialog(() => setRulesTick((t) => t + 1));
@@ -901,20 +968,20 @@
                   ${s.verdict === "malicious" || s.verdict === "suspicious" ? html` <span class=${"rep " + s.verdict}>${VERDICTS[s.verdict].icon} ${VERDICTS[s.verdict].label}</span>` : null}
                   ${s.harmless ? html` <span class="badge harmless">harmlos</span>` : null}
                   ${blockedBy[s.sid] ? html` <span class=${"badge " + (blockedBy[s.sid].enabled ? "blocked" : "harmless")} title=${T("eigene Regel SID {n}", { n: blockedBy[s.sid].sid })}>${blockedBy[s.sid].enabled ? T("eigene {a}-Regel", { a: blockedBy[s.sid].action }) : "eigene Regel deaktiviert"}</span>` : null}</div>
-                <div class="cat"><button class="link" onClick=${() => goAlerts({ sid: s.sid })}>SID ${s.gid}:${s.sid}</button>${s.category ? " · " + s.category : ""}${s.note ? " · „" + s.note + "“" : ""}</div>
+                <div class="cat"><button class="link" onClick=${() => goAlerts({ sid: s.sid })}>SID ${s.gid}:${s.sid}</button>${s.category ? " · " + s.category : ""}${s.note ? " · „" + s.note + "“" : ""}${s.ctx_hidden ? " · " + T("{n} harmlos mit Kontext ausgeblendet", { n: fmtNum(s.ctx_hidden) }) : s.ctx_rules ? " · " + T("{n} Kontext-Regel(n)", { n: s.ctx_rules }) : ""}</div>
               </td>
               <td><${Severity} s=${s.severity} /></td>
               <td class="num">${fmtNum(s.count)}</td>
               <td class="num">${fmtNum(s.blocked)}</td>
-              <td class="mono" style=${{ fontSize: 12 }}>${(s.examples || []).map((e, i) => html`<div key=${i} class="example"><span class="nowrap">${e.src_ip}<${CopyButton} text=${e.src_ip} /><${DevName} ip=${e.src_ip} /> → ${e.dest_ip}${e.dest_port != null ? ":" + e.dest_port : ""}<${CopyButton} text=${e.dest_ip} /> <span style=${{ color: "var(--muted)" }}>×${e.n}</span></span>
+              <td class="mono" style=${{ fontSize: 12 }}>${(s.examples || []).map((e, i) => html`<div key=${i} class="example"><span class="nowrap">${e.src_ip}<${CopyButton} text=${e.src_ip} /><${DevName} ip=${e.src_ip} /></span> <span class="nowrap">→ ${e.dest_ip}${e.dest_port != null ? ":" + e.dest_port : ""}<${CopyButton} text=${e.dest_ip} /> <span style=${{ color: "var(--muted)" }}>×${e.n}</span></span>
                 ${[e.src_rep, e.dest_rep].map((r, j) => html`<${RepBadge} key=${j} r=${r} withName />`)}</div>`)}
                 ${s.src_count > 1 || s.dest_count > 1 ? html`<div class="cat">${s.src_count} Quellen, ${s.dest_count} Ziele</div>` : null}</td>
-              <td class="nowrap">${fmtDateTime(s.first_seen)}</td>
+              <td class="ts-cell">${fmtDateTime(s.first_seen)}</td>
               <td class="nowrap">${fmtAgo(s.last_seen)}</td>
-              <td class="nowrap">${s.harmless
-                ? html`<button class="btn" onClick=${() => unflag(s)}>Markierung aufheben</button>`
+              <td class="actions-cell"><div class="row-actions">${s.harmless
+                ? html`<button class="btn" onClick=${() => unflag({ gid: s.gid, sid: s.sid })}>Markierung aufheben</button>`
                 : html`<button class="btn" onClick=${() => flag(s)}>Harmlos</button>`}
-                ${isAdmin && html` <button class="btn" title="drop/reject-Regel in local.rules anlegen" onClick=${() => openRule({ gid: s.gid, sid: s.sid, signature: s.signature })}>Sperren …</button>`}</td>
+                ${isAdmin && html`<button class="btn" title="drop/reject-Regel in local.rules anlegen" onClick=${() => openRule({ gid: s.gid, sid: s.sid, signature: s.signature })}>Sperren …</button>`}</div></td>
             </tr>`)}</tbody>
         </table></div>`}
       </div>
@@ -932,6 +999,21 @@
             <td class="num">${fmtNum(f.total)}</td>
             <td class="nowrap">${fmtAgo(f.last_seen)}</td>
             <td><button class="btn" onClick=${() => unflag(f)}>Markierung aufheben</button></td>
+          </tr>`)}</tbody>
+        </table></div>`}
+        ${ctxRules && ctxRules.length > 0 && html`
+        <h2 style=${{ marginTop: 18 }}>Harmlos mit Kontext</h2>
+        <div class="sub">Diese Signaturen sind nur bei bestimmten Gegenstellen ausgeblendet. Andere Alerts derselben Signatur bleiben sichtbar – und Adressen auf Blocklisten immer.</div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Signatur</th><th>Bedingung</th><th>Notiz</th><th>Angelegt</th><th class="num">Ausgeblendet</th><th>Zuletzt</th><th></th></tr></thead>
+          <tbody>${ctxRules.map((r) => html`<tr key=${r.id}>
+            <td><div class="sig">${r.signature || "(noch nicht gesehen)"}</div><div class="cat">SID ${r.gid}:${r.sid}</div></td>
+            <td>${tr(r.desc)}</td>
+            <td>${r.note || html`<span class="cat">–</span>`}</td>
+            <td class="nowrap">${fmtDateTime(r.created)}</td>
+            <td class="num">${fmtNum(r.hidden)}</td>
+            <td class="nowrap">${fmtAgo(r.last_hidden)}</td>
+            <td><button class="btn" onClick=${() => unflag({ rule_id: r.id })}>Aufheben</button></td>
           </tr>`)}</tbody>
         </table></div>`}
       </div>

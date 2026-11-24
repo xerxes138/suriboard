@@ -27,6 +27,7 @@ A lightweight web dashboard for Suricata (IPS/IDS) on a Raspberry Pi, similar in
 - **Alerts** (from `fast.log` or eve.json): a filterable list (search, IP, SID, blocked only) with action (blocked / would block / allowed) and severity.
 - **Signatures („Signaturen“):** alerts grouped by rule (SID), with hit count, example connections and first-seen time. Signatures that appear for the first time within the last 24 h get a **NEU** (new) badge.
 - **Mark as harmless („Harmlos“):** one click (with an optional note) hides the SID everywhere, including future hits, e.g. apt updates or Discord. What is left is new or potentially dangerous. The mark can be removed at any time.
+  - **Harmless in context („Nur in diesem Zusammenhang“):** a signature can also be marked as harmless only for certain peers, e.g. *ET INFO Packed Executable Download* only when the download comes from Windows Update. The condition is one of: a known update/system service (or any of them), a network operator (ASN, e.g. AS8075 Microsoft), a domain including subdomains, or an IP address/network. Other alerts of the same signature stay visible. A context rule **never** applies when one of the addresses is on a block list or rated suspicious. The dialog shows how many alerts of the last 30 days the rule would hide before you save it; the rules are listed on the Signatures tab under „Harmlos mit Kontext“.
 - **Block („Sperren …“):** create a Suricata drop/reject rule straight from an alert or a signature, written to your own rules file (e.g. `local.rules`). See [Own blocking rules](#own-blocking-rules-localrules).
 - **Alert details with eve.json context:** clicking an alert („Details“ or the signature) shows what eve.json contains around the alert:
   - **This connection:** all events with the same flow ID or the same IPs, ports and protocol (alert, flow, tls, http, fileinfo …).
@@ -289,7 +290,7 @@ How the dashboard rates:
 **What is backed up:** everything you entered yourself:
 - paths, alert source, HTTPS and rules settings
 - device names (by MAC or IP)
-- signatures marked as harmless
+- signatures marked as harmless, including the context rules
 - notes on TLS fingerprints
 - muted anomaly warnings
 - enabled and disabled threat feeds
@@ -419,6 +420,7 @@ backend/auth.py             users, login, sessions (also a command line tool)
 backend/tls.py              HTTPS, self-signed certificate, redirect
 backend/userdata.py         export/import and automatic backup of user data, database backup
 backend/anomaly.py          behaviour profiles of local devices and anomaly detection
+backend/ctxflags.py         harmless marks with context (signature only for certain peers)
 backend/rules.py            own blocking rules: build, read/write local.rules, check suricata.yaml, reload
 frontend/index.html         entry point
 frontend/login.html         login page
@@ -458,6 +460,7 @@ All calls except `POST /api/login` need the session cookie (otherwise `401`). Mo
 `GET /api/summary|traffic|protocols|top|alerts|alerts/timeline|signatures|flags|status|event_types?hours=24`
 `GET /api/alert_context?id=<alert-id>&before=60&after=300` · `GET /api/settings` · `GET /api/settings/check?path=…` · `GET /api/settings/find` · `POST /api/settings {"eve_json":"…","fast_log":"…","alert_source":"fastlog"}`
 `GET /api/live?hold=30&alerts=0&lan=1&groups=1` (enables the one-second interval for 20 s) · `GET /api/devices` · `GET /api/devices/names` · `POST /api/devices {"kind":"mac","key":"3c:22:fb:12:34:56","name":"Printer"}` (empty name deletes) · `POST /api/flags {"gid":1,"sid":2013504,"note":"apt"}` · `DELETE /api/flags?gid=1&sid=2013504`
+`POST /api/flags {"gid":1,"sid":2014819,"kind":"service|asn|domain|cidr","value":"Windows Update","note":"…"}` (harmless in context) · `POST /api/flags/preview` (same body, saves nothing) · `GET /api/flags/rules` · `GET /api/flags/suggest?alert_id=<id>` or `?gid=1&sid=<sid>` · `DELETE /api/flags?rule=<id>`
 
 ## License
 

@@ -42,8 +42,9 @@ import tls
 import userdata
 import anomaly
 import rules as rulesmod
+import ctxflags
 
-VERSION = "1.11.0"
+VERSION = "1.12.0"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(BASE_DIR)
@@ -640,6 +641,7 @@ class Ingestor(threading.Thread):
         self.write_clock = 0       # groesster bisher gesehener Zeitstempel in eve.json
         self.index_key = None      # (inode, minute) des letzten Index-Eintrags
         self.live_on = False
+        self.post_flush = None     # Api.ctx.after_flush (Harmlos-Regeln mit Kontext), von main gesetzt
         self.live = LiveTracker(self.alerts_from_eve)
         # intel wird in main() gesetzt (ThreatIntel entsteht nach dem Ingestor)
         self.profiler = anomaly.Profiler(None) if cfg.get("anomaly_detection", True) else None
@@ -746,6 +748,11 @@ class Ingestor(threading.Thread):
                     self.live.feed_fast_alert(a)
 
         self.flush(batch)
+        if self.post_flush:
+            try:
+                self.post_flush(self.conn)
+            except Exception:
+                log.exception("Fehler bei den Harmlos-Regeln mit Kontext")
         self.live.tick(n)
         behind = (self.eve.offset or 0) < self.eve.size or (
             not self.alerts_from_eve and (self.fast.offset or 0) < self.fast.size)
@@ -1043,6 +1050,7 @@ class Api:
         self.rule_index = rulesmod.RuleIndex()
         self.rules_file = rulesmod.RulesFile(os.path.dirname(cfg["db_path"]))
         self.reloader = rulesmod.Reloader()
+        self.ctx = ctxflags.Evaluator(lambda c, ips: self.assess_ips(c, ips, keep_names=100))
 
     @contextlib.contextmanager
     def db(self):
@@ -1067,7 +1075,8 @@ class Api:
     def flag_filter(q, alias="a"):
         if q.get("include_harmless", ["0"])[0] in ("1", "true"):
             return ""
-        return (" AND NOT EXISTS (SELECT 1 FROM flags f WHERE f.gid=%s.gid AND f.sid=%s.sid)"
+        return (" AND %s.ctx_flag IS NULL" % alias +
+                " AND NOT EXISTS (SELECT 1 FROM flags f WHERE f.gid=%s.gid AND f.sid=%s.sid)"
                 % (alias, alias))
 
     # --- Reputation ------------------------------------------------------------
@@ -1149,9 +1158,9 @@ class Api:
                            (since,)).fetchone()
             a = c.execute(
                 "SELECT COUNT(*) total, "
-                "SUM(CASE WHEN f.sid IS NULL THEN 1 ELSE 0 END) open, "
-                "SUM(CASE WHEN f.sid IS NOT NULL THEN 1 ELSE 0 END) harmless, "
-                "SUM(CASE WHEN a.action='blocked' AND f.sid IS NULL THEN 1 ELSE 0 END) blocked_open, "
+                "SUM(CASE WHEN f.sid IS NULL AND a.ctx_flag IS NULL THEN 1 ELSE 0 END) open, "
+                "SUM(CASE WHEN f.sid IS NOT NULL OR a.ctx_flag IS NOT NULL THEN 1 ELSE 0 END) harmless, "
+                "SUM(CASE WHEN a.action='blocked' AND f.sid IS NULL AND a.ctx_flag IS NULL THEN 1 ELSE 0 END) blocked_open, "
                 "SUM(CASE WHEN a.action='blocked' THEN 1 ELSE 0 END) blocked, "
                 "COUNT(DISTINCT a.gid || ':' || a.sid) sids "
                 "FROM alerts a LEFT JOIN flags f ON f.gid=a.gid AND f.sid=a.sid WHERE a.ts >= ?",
@@ -1167,7 +1176,7 @@ class Api:
             anomalies_open = c.execute("SELECT COUNT(*) n FROM anomalies WHERE status='open'").fetchone()["n"]
             rep = defaultdict(int)
             for _, _, n, v in self._pair_verdicts(
-                    c, "a.ts >= ? AND f.sid IS NULL", (since,),
+                    c, "a.ts >= ? AND f.sid IS NULL AND a.ctx_flag IS NULL", (since,),
                     "LEFT JOIN flags f ON f.gid=a.gid AND f.sid=a.sid"):
                 rep[v] += n
         return {
@@ -1244,7 +1253,7 @@ class Api:
         with self.db() as c:
             rows = c.execute(
                 "SELECT (a.ts / ?) * ? AS b, "
-                "CASE WHEN f.sid IS NOT NULL THEN 'harmlos' "
+                "CASE WHEN f.sid IS NOT NULL OR a.ctx_flag IS NOT NULL THEN 'harmlos' "
                 "     WHEN a.severity <= 1 THEN 'Schwere 1' "
                 "     WHEN a.severity = 2 THEN 'Schwere 2' ELSE 'Schwere 3+' END AS name, "
                 "COUNT(*) v FROM alerts a LEFT JOIN flags f ON f.gid=a.gid AND f.sid=a.sid "
@@ -1290,15 +1299,19 @@ class Api:
                           "(SELECT s, d FROM rep_pairs)")
             total = c.execute("SELECT COUNT(*) n FROM alerts a WHERE " + where, args).fetchone()["n"]
             rows = c.execute(
-                "SELECT a.*, (f.sid IS NOT NULL) harmless, f.note, "
+                "SELECT a.*, (f.sid IS NOT NULL OR a.ctx_flag IS NOT NULL) harmless, (f.sid IS NOT NULL) sig_flag, "
+                "COALESCE(f.note, r.note) note, r.kind ctx_kind, r.value ctx_value, "
                 "(s.first_seen >= ?) is_new, s.first_seen "
                 "FROM alerts a LEFT JOIN flags f ON f.gid=a.gid AND f.sid=a.sid "
+                "LEFT JOIN flag_rules r ON r.id=a.ctx_flag "
                 "LEFT JOIN signatures s ON s.gid=a.gid AND s.sid=a.sid "
                 "WHERE " + where + " ORDER BY a.ts DESC, a.id DESC LIMIT ? OFFSET ?",
                 [new_since] + args + [limit, offset]).fetchall()
             items = [dict(r) for r in rows]
             reps = self.assess_ips(c, {i["src_ip"] for i in items} | {i["dest_ip"] for i in items})
         for it in items:
+            it["ctx_desc"] = ctxflags.describe({"kind": it["ctx_kind"], "value": it["ctx_value"]}) \
+                if it.get("ctx_flag") and it.get("ctx_kind") else None
             sr, dr = reps.get(it["src_ip"]), reps.get(it["dest_ip"])
             it["rep"] = {"verdict": self.intel.combine([sr, dr]),
                          "src": compact_rep(sr), "dest": compact_rep(dr)}
@@ -1320,11 +1333,20 @@ class Api:
                 " GROUP BY a.gid, a.sid ORDER BY harmless ASC, is_new DESC, count DESC",
                 (new_since, since)).fetchall()
             items = [dict(r) for r in rows]
-            # Beispiel-Verbindungen (haeufigste Quell->Ziel-Paare) je Signatur
+            ctx_hidden = {(r["gid"], r["sid"]): r["n"] for r in c.execute(
+                "SELECT gid, sid, COUNT(*) n FROM alerts WHERE ts >= ? AND ctx_flag IS NOT NULL "
+                "GROUP BY gid, sid", (since,))}
+            ctx_rules = {(r["gid"], r["sid"]): r["n"] for r in c.execute(
+                "SELECT gid, sid, COUNT(*) n FROM flag_rules GROUP BY gid, sid")}
+            for it in items:
+                it["ctx_hidden"] = ctx_hidden.get((it["gid"], it["sid"]), 0)
+                it["ctx_rules"] = ctx_rules.get((it["gid"], it["sid"]), 0)
+            # Beispiel-Verbindungen (haeufigste Quell->Ziel-Paare) je Signatur, ohne per Kontext ausgeblendete
+            ctx_cond = "" if q.get("include_harmless", ["0"])[0] in ("1", "true") else " AND ctx_flag IS NULL"
             for it in items[:200]:
                 ex = c.execute(
                     "SELECT src_ip, dest_ip, dest_port, COUNT(*) n FROM alerts "
-                    "WHERE gid=? AND sid=? AND ts >= ? GROUP BY src_ip, dest_ip, dest_port "
+                    "WHERE gid=? AND sid=? AND ts >= ?" + ctx_cond + " GROUP BY src_ip, dest_ip, dest_port "
                     "ORDER BY n DESC LIMIT 3", (it["gid"], it["sid"], since)).fetchall()
                 it["examples"] = [dict(e) for e in ex]
             ips = {e[k] for it in items[:200] for e in it["examples"] for k in ("src_ip", "dest_ip")}
@@ -1371,6 +1393,8 @@ class Api:
         gid = int(body.get("gid", 1))
         sid = int(body["sid"])
         note = (body.get("note") or "")[:500]
+        if body.get("kind"):
+            return self._set_flag_rule(gid, sid, body["kind"], body.get("value"), note)
         with self.db() as c:
             c.execute(
                 "INSERT INTO flags(gid, sid, status, note, created) VALUES(?,?,'harmless',?,?) "
@@ -2179,6 +2203,9 @@ class Api:
                 summary["rules"] = userdata.apply_rules(self.cfg, doc, os.path.dirname(self.cfg["db_path"]))
             except (OSError, ValueError) as e:
                 notes.append("Regeln nicht übernommen: %s" % e)
+        if "flag_rules" in sections:
+            with self.db() as c:
+                self.ctx.apply(c)
         if "users" in sections and self.auth:
             self.auth._forget_cache()
         self._dev_cache = (0, None)
@@ -2395,11 +2422,101 @@ class Api:
         return {"ok": True, "restarting": True, "scheme": "https" if new["https"] else "http", "port": port}
 
     def delete_flag(self, q):
+        if q.get("rule"):
+            with self.db() as c:
+                r = c.execute("SELECT gid, sid FROM flag_rules WHERE id=?", (int(q["rule"][0]),)).fetchone()
+                if not r:
+                    raise KeyError("Regel")
+                c.execute("DELETE FROM flag_rules WHERE id=?", (int(q["rule"][0]),))
+                self.ctx.apply(c, gid=r["gid"], sid=r["sid"])
+            return {"ok": True}
         gid = int(q.get("gid", ["1"])[0])
         sid = int(q["sid"][0])
         with self.db() as c:
             c.execute("DELETE FROM flags WHERE gid=? AND sid=?", (gid, sid))
         return {"ok": True}
+
+    # ---- Harmlos mit Kontext -------------------------------------------------
+
+    def _set_flag_rule(self, gid, sid, kind, value, note):
+        if kind not in ctxflags.KINDS:
+            raise ValueError("unbekannte Art: %s" % kind)
+        value = ctxflags.normalize(kind, value)
+        with self.db() as c:
+            row = c.execute("SELECT id FROM flag_rules WHERE gid=? AND sid=? AND kind=? AND value=?",
+                            (gid, sid, kind, value)).fetchone()
+            if row:
+                c.execute("UPDATE flag_rules SET note=? WHERE id=?", (note, row["id"]))
+                rid = row["id"]
+            else:
+                rid = c.execute("INSERT INTO flag_rules(gid, sid, kind, value, note, created) VALUES(?,?,?,?,?,?)",
+                                (gid, sid, kind, value, note, int(time.time()))).lastrowid
+            self.ctx.apply(c, gid=gid, sid=sid)
+            n = c.execute("SELECT COUNT(*) n FROM alerts WHERE ctx_flag=?", (rid,)).fetchone()["n"]
+        return {"ok": True, "id": rid, "matched": n}
+
+    def flag_rules(self, q):
+        with self.db() as c:
+            rows = c.execute(
+                "SELECT r.*, s.signature, s.last_seen, "
+                "(SELECT COUNT(*) FROM alerts a WHERE a.ctx_flag=r.id) hidden, "
+                "(SELECT MAX(ts) FROM alerts a WHERE a.ctx_flag=r.id) last_hidden "
+                "FROM flag_rules r LEFT JOIN signatures s ON s.gid=r.gid AND s.sid=r.sid "
+                "ORDER BY r.created DESC").fetchall()
+        out = [dict(r) for r in rows]
+        for r in out:
+            r["desc"] = ctxflags.describe(r)
+        return out
+
+    def flag_suggest(self, q):
+        """Context options for the harmless dialog: the peers of an alert or of a signature."""
+        with self.db() as c:
+            if q.get("alert_id"):
+                a = c.execute("SELECT gid, sid, src_ip, dest_ip FROM alerts WHERE id=?",
+                              (int(q["alert_id"][0]),)).fetchone()
+                if not a:
+                    raise KeyError("Alert")
+                gid, sid, ips = a["gid"], a["sid"], [a["src_ip"], a["dest_ip"]]
+            else:
+                gid, sid = int(q.get("gid", ["1"])[0]), int(q["sid"][0])
+                ips = [r["ip"] for r in c.execute(
+                    "SELECT ip, COUNT(*) n FROM (SELECT src_ip ip FROM alerts WHERE gid=? AND sid=? "
+                    "UNION ALL SELECT dest_ip FROM alerts WHERE gid=? AND sid=?) WHERE ip IS NOT NULL "
+                    "GROUP BY ip ORDER BY n DESC LIMIT 6", (gid, sid, gid, sid))]
+            ips = [ip for i, ip in enumerate(ips) if ip and ip not in ips[:i]]
+            reps = self.assess_ips(c, ips, keep_names=20)
+            rules = [dict(r, desc=ctxflags.describe(r)) for r in
+                     c.execute("SELECT * FROM flag_rules WHERE gid=? AND sid=? ORDER BY id", (gid, sid))]
+            flagged = c.execute("SELECT 1 FROM flags WHERE gid=? AND sid=?", (gid, sid)).fetchone() is not None
+        peers = []
+        for ip in ips:
+            r = reps.get(ip) or {}
+            asn = r.get("asn")
+            domains = []
+            for n in r.get("names") or []:
+                d = anomaly.base_domain(n.get("name"))
+                if d and d not in domains:
+                    domains.append(d)
+            peers.append({"ip": ip, "global": bool(r.get("global")), "verdict": r.get("verdict"),
+                          "services": r.get("services") or [],
+                          "asn": {"asn": asn["asn"], "name": asn.get("short") or asn.get("name")} if asn else None,
+                          "names": [n["name"] for n in (r.get("names") or [])][:5], "domains": domains[:5]})
+        peers.sort(key=lambda p: not p["global"])
+        return {"gid": gid, "sid": sid, "peers": peers, "rules": rules, "flagged": flagged}
+
+    def flag_preview(self, body):
+        """How many of the signature's alerts (last 30 days) the rule would hide, without saving it."""
+        gid, sid = int(body.get("gid", 1)), int(body["sid"])
+        kind = body.get("kind")
+        if kind not in ctxflags.KINDS:
+            raise ValueError("unbekannte Art: %s" % kind)
+        rule = {"id": 0, "kind": kind, "value": ctxflags.normalize(kind, body.get("value"))}
+        with self.db() as c:
+            rows = c.execute("SELECT src_ip, dest_ip, COUNT(*) n FROM alerts WHERE gid=? AND sid=? AND ts >= ? "
+                             "GROUP BY src_ip, dest_ip", (gid, sid, int(time.time()) - 30 * 86400)).fetchall()
+            reps = self.assess_ips(c, {r["src_ip"] for r in rows} | {r["dest_ip"] for r in rows}, keep_names=100)
+        hit = sum(r["n"] for r in rows if ctxflags.matches(rule, r, reps))
+        return {"matched": hit, "total": sum(r["n"] for r in rows), "value": rule["value"]}
 
 
 # --------------------------------------------------------------------------
@@ -2454,6 +2571,8 @@ def make_handler(api, auth, is_tls=False):
         "/api/alerts/timeline": api.alert_timeline,
         "/api/signatures": api.signatures,
         "/api/flags": api.flags,
+        "/api/flags/rules": api.flag_rules,
+        "/api/flags/suggest": api.flag_suggest,
         "/api/status": api.status,
         "/api/settings": api.settings,
         "/api/alert_context": api.alert_context,
@@ -2475,6 +2594,7 @@ def make_handler(api, auth, is_tls=False):
     }
     post_routes = {
         "/api/flags": api.set_flag,
+        "/api/flags/preview": api.flag_preview,
         "/api/settings": api.save_settings,
         "/api/intel/feeds": api.intel_set_feed,
         "/api/intel/update": api.intel_update,
@@ -2790,6 +2910,7 @@ def main():
     conn = connect(cfg["db_path"])
     conn.executescript(SCHEMA)
     conn.executescript(anomaly.SCHEMA)
+    ctxflags.migrate(conn)
     conn.close()
     migrate_settings(cfg)
 
@@ -2807,6 +2928,7 @@ def main():
 
     mimetypes.add_type("application/javascript", ".js")
     api = Api(cfg, ingestor, intel)
+    ingestor.post_flush = api.ctx.after_flush
     api.auth = auth
     api.backup = userdata.AutoBackup(cfg, connect, VERSION)
     api.backup.start()

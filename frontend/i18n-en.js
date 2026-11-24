@@ -422,9 +422,39 @@ Object.assign(window.I18N_EN, {
   "· eingehend": "· incoming", "· aktiv": "· active", "· beendet": "· finished", "▶ weiter": "▶ resume", "❚❚ anhalten": "❚❚ pause",
 });
 
+Object.assign(window.I18N_EN, {
+  "Bekannter Dienst": "Known service", "Netzbetreiber": "Network operator", "IP / Netz": "IP / network",
+  "Ganze Signatur": "Whole signature", "Nur in diesem Zusammenhang": "Only in this context",
+  "Alle bisherigen und künftigen Alerts dieser Signatur werden in den Standardansichten ausgeblendet.": "All past and future alerts of this signature are hidden in the default views.",
+  "Harmlos nur, wenn die Gegenstelle zu einem bestimmten Dienst, Netz oder einer Domain gehört. Bei anderen Adressen wirst du weiter gewarnt.": "Harmless only when the peer belongs to a certain service, network or domain. For other addresses you are still warned.",
+  "Bedingung für die Gegenstelle": "Condition for the peer", "jeder bekannte Update-/Systemdienst": "any known update/system service",
+  "Für die beteiligten Adressen wurde kein bekannter Dienst erkannt.": "No known service was recognised for the addresses involved.",
+  "Bekannte Dienste erkennt das Dashboard am Hostnamen der Gegenstelle (z. B. Windows Update, Microsoft, Apple, Debian).": "The dashboard recognises known services by the peer's host name (e.g. Windows Update, Microsoft, Apple, Debian).",
+  "z. B. 8075": "e.g. 8075", "Das Netz eines Betreibers, z. B. AS8075 Microsoft. Braucht den Feed „IP → Netzbetreiber“.": "The network of an operator, e.g. AS8075 Microsoft. Needs the “IP → network operator” feed.",
+  "z. B. microsoft.com": "e.g. microsoft.com",
+  "Trifft zu, wenn ein Hostname der Gegenstelle diese Domain oder eine Subdomain ist (aus DNS, TLS-SNI, HTTP).": "Applies when a host name of the peer is this domain or a subdomain of it (from DNS, TLS SNI, HTTP).",
+  "z. B. 13.107.0.0/16 oder 192.168.1.20": "e.g. 13.107.0.0/16 or 192.168.1.20",
+  "Eine Adresse oder ein Netz in CIDR-Schreibweise. Gilt für Quelle und Ziel, auch für lokale Geräte.": "An address or a network in CIDR notation. Applies to source and destination, including local devices.",
+  "Gilt nie, wenn eine der Adressen auf einer Blockliste steht oder als auffällig gilt – solche Alerts bleiben immer sichtbar.": "Never applies when one of the addresses is on a block list or rated suspicious – such alerts always stay visible.",
+  "Würde {m} von {t} Alerts dieser Signatur der letzten 30 Tage ausblenden.": "Would hide {m} of {t} alerts of this signature from the last 30 days.",
+  "Bestehende Regeln:": "Existing rules:", "Kontext-Regel „{x}“ für diese Signatur aufheben?": "Remove the context rule “{x}” for this signature?",
+  "harmlos (Kontext)": "harmless (context)", "Kontext-Regel aufheben": "Remove context rule",
+  "{n} harmlos mit Kontext ausgeblendet": "{n} hidden as harmless in context", "{n} Kontext-Regel(n)": "{n} context rule(s)",
+  "Harmlos mit Kontext": "Harmless in context",
+  "Diese Signaturen sind nur bei bestimmten Gegenstellen ausgeblendet. Andere Alerts derselben Signatur bleiben sichtbar – und Adressen auf Blocklisten immer.": "These signatures are only hidden for certain peers. Other alerts of the same signature stay visible – and addresses on block lists always do.",
+  "Bedingung": "Condition", "Ausgeblendet": "Hidden", "Aufheben": "Remove", "Als harmlos markieren": "Mark as harmless",
+  "Harmlos mit Kontext (Signatur nur bei bestimmter Gegenstelle)": "Harmless in context (signature only for certain peers)",
+  "Gegenstelle ist ein bekannter Dienst": "Peer is a known service",
+  "ungültiger Dienst": "invalid service", "ungültige AS-Nummer": "invalid AS number", "ungültige Domain": "invalid domain",
+  "ungültige IP-Adresse oder ungültiges Netz": "invalid IP address or network",
+});
+
 // Messages with values: [regular expression, English replacement]. Captured groups are translated
 // again if they are German themselves (e.g. a nested error message).
 window.I18N_EN_PATTERNS = [
+  ["^Gegenstelle gehört zu (.*)$", "Peer belongs to $1"], ["^Gegenstelle im Netz von AS(\\d+)$", "Peer in the network of AS$1"],
+  ["^Hostname der Gegenstelle endet auf (.*)$", "Peer host name ends in $1"], ["^Adresse in (.*)$", "Address in $1"],
+  ["^unbekannte Art:\\s*(.*)$", "unknown kind: $1"],
   ["^ungueltige Anfrage:\\s*(.*)$", "invalid request: $1"], ["^ungueltiger Wert:\\s*(.*)$", "invalid value: $1"],
   ["^fehlt/unbekannt:\\s*(.*)$", "missing/unknown: $1"], ["^Dateifehler:\\s*(.*)$", "file error: $1"],
   ["^nicht lesbar:\\s*(.*)$", "not readable: $1"], ["^hold muss einer von (.*) sein$", "hold must be one of $1"],

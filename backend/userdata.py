@@ -42,11 +42,12 @@ log = logging.getLogger("suricata-dashboard")
 
 FORMAT = "suricata-dashboard-userdata"
 FORMAT_VERSION = 1
-SECTIONS = ("settings", "device_names", "flags", "fp_notes", "anomaly_mutes", "feeds", "rules", "users")
+SECTIONS = ("settings", "device_names", "flags", "flag_rules", "fp_notes", "anomaly_mutes", "feeds", "rules", "users")
 SECTION_LABELS = {
     "settings": "Einstellungen (Pfade, Alert-Quelle, HTTPS)",
     "device_names": "Gerätenamen",
     "flags": "Harmlos markierte Signaturen",
+    "flag_rules": "Harmlos mit Kontext (Signatur nur bei bestimmter Gegenstelle)",
     "fp_notes": "Notizen zu TLS-Fingerprints",
     "anomaly_mutes": "Stummgeschaltete Anomalie-Warnungen",
     "feeds": "Ein-/ausgeschaltete Threat-Feeds",
@@ -57,7 +58,7 @@ SECTION_LABELS = {
 SETTING_KEYS = ("eve_json", "fast_log", "alert_source", "https", "https_port", "http_redirect",
                 "rules_dir", "local_rules", "suricata_yaml", "rules_reload")
 HTTPS_KEYS = ("https", "https_port", "http_redirect")
-CONTENT_SECTIONS = ("device_names", "flags", "fp_notes", "anomaly_mutes", "feeds")
+CONTENT_SECTIONS = ("device_names", "flags", "flag_rules", "fp_notes", "anomaly_mutes", "feeds")
 RULE_PATH_KEYS = ("rules_dir", "local_rules", "suricata_yaml")
 
 BACKUP_DIR = "backups"
@@ -99,6 +100,9 @@ def collect(cfg, conn, include_users=True):
         "fp_notes": rows("SELECT type, fp, label, harmless, updated FROM fp_notes ORDER BY type, fp"),
         "feeds": {},
     }
+    with contextlib.suppress(Exception):  # Tabelle fehlt vor Version 1.12
+        data["flag_rules"] = rows("SELECT gid, sid, kind, value, note, created FROM flag_rules "
+                                  "ORDER BY gid, sid, kind, value")
     with contextlib.suppress(Exception):  # Tabelle fehlt vor Version 1.9
         data["anomaly_mutes"] = rows("SELECT dev, kind, metric, created FROM anomaly_mutes "
                                      "ORDER BY dev, kind, metric")
@@ -222,6 +226,26 @@ def apply(conn, doc, sections, mode="merge"):
                               int(f.get("created") or now)))
                 n += 1
             summary["flags"] = n
+        if "flag_rules" in sections and isinstance(doc.get("flag_rules"), list):
+            import ctxflags
+            if mode == "replace":
+                conn.execute("DELETE FROM flag_rules")
+            n = 0
+            for f in doc["flag_rules"]:
+                try:
+                    gid, sid, kind = int(f.get("gid", 1)), int(f["sid"]), str(f["kind"])
+                    value = ctxflags.normalize(kind, f.get("value"))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if conn.execute("SELECT 1 FROM flag_rules WHERE gid=? AND sid=? AND kind=? AND value=?",
+                                (gid, sid, kind, value)).fetchone():
+                    conn.execute("UPDATE flag_rules SET note=? WHERE gid=? AND sid=? AND kind=? AND value=?",
+                                 (f.get("note"), gid, sid, kind, value))
+                else:
+                    conn.execute("INSERT INTO flag_rules(gid, sid, kind, value, note, created) VALUES(?,?,?,?,?,?)",
+                                 (gid, sid, kind, value, f.get("note"), int(f.get("created") or now)))
+                n += 1
+            summary["flag_rules"] = n
         if "fp_notes" in sections and isinstance(doc.get("fp_notes"), list):
             if mode == "replace":
                 conn.execute("DELETE FROM fp_notes")
@@ -581,7 +605,9 @@ def cli():
     conn.executescript(server.SCHEMA)
     conn.executescript(authmod.AUTH_SCHEMA)
     import anomaly
+    import ctxflags
     conn.executescript(anomaly.SCHEMA)
+    ctxflags.migrate(conn)
     try:
         if args.cmd == "export":
             doc = envelope(collect(cfg, conn, include_users=not args.no_users), server.VERSION)
