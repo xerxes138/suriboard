@@ -11,7 +11,7 @@
     { h: 168, label: "7 Tage" }, { h: 720, label: "30 Tage" },
   ];
   const REFRESH_MS = 30000;
-  const FRONTEND_VERSION = "1.9.2";
+  const FRONTEND_VERSION = "1.10.0";
 
   async function api(path, opts) {
     const r = await fetch(path, { credentials: "same-origin", ...(opts || {}) });
@@ -32,6 +32,7 @@
     const [state, setState] = useState({ data: null, error: null, loading: true });
     useEffect(() => {
       let alive = true;
+      if (!path) { setState({ data: null, error: null, loading: false }); return; }
       setState((s) => ({ ...s, loading: true }));
       api(path)
         .then((data) => alive && setState({ data, error: null, loading: false }))
@@ -323,6 +324,7 @@
 
   // Selbst vergebene Geraetenamen {ip: [name, quelle]} fuer alle Ansichten
   const DevCtx = React.createContext({ names: {}, reload: () => {} });
+  const AdminCtx = React.createContext(false);
   function useDevName(ip) {
     const { names } = React.useContext(DevCtx);
     return (names && ip && names[ip]) || null;
@@ -380,6 +382,8 @@
 
   function AlertTable({ items, onFlag, onUnflag, onIp, onSid, compact }) {
     const [detail, setDetail] = useState(null);
+    const isAdmin = React.useContext(AdminCtx);
+    const { openRule, ruleDialog } = useRuleDialog();
     if (!items) return html`<div class="empty">lädt …</div>`;
     if (!items.length) return html`<div class="empty">Keine Alerts – alles ruhig 🎉</div>`;
     return html`<div class="table-wrap"><table>
@@ -405,11 +409,14 @@
             <button class="btn" onClick=${() => setDetail(a)}>Details</button>${" "}
             ${a.harmless
               ? html`<button class="btn" onClick=${() => onUnflag(a)}>Markierung aufheben</button>`
-              : html`<button class="btn" onClick=${() => onFlag(a)}>Harmlos</button>`}</td>
+              : html`<button class="btn" onClick=${() => onFlag(a)}>Harmlos</button>`}
+            ${isAdmin && html` <button class="btn" title="drop/reject-Regel in local.rules anlegen" onClick=${() => openRule({ alertId: a.id })}>Sperren …</button>`}</td>
         </tr>`)}</tbody>
     </table></div>
     ${detail && html`<${AlertDetail} alert=${detail} onClose=${() => setDetail(null)}
-      onFlag=${detail.harmless ? null : () => { const d = detail; setDetail(null); onFlag(d); }} />`}`;
+      onFlag=${detail.harmless ? null : () => { const d = detail; setDetail(null); onFlag(d); }}
+      onRule=${isAdmin ? () => { const d = detail; setDetail(null); openRule({ alertId: d.id }); } : null} />`}
+    ${ruleDialog}`;
   }
 
   // ------------------------------------------------------------------ Alert-Details / eve-Kontext
@@ -531,7 +538,7 @@
     </div>`;
   }
 
-  function AlertDetail({ alert: a, onClose, onFlag }) {
+  function AlertDetail({ alert: a, onClose, onFlag, onRule }) {
     const [win, setWin] = useState(1);
     const w = WINDOWS[win];
     const { data, error, loading } = useApi(`/api/alert_context?id=${a.id}&before=${w.b}&after=${w.a}`);
@@ -602,6 +609,7 @@
           <${CopyButton} text=${a.src_ip + " " + a.dest_ip} label="Beide IPs" title="Quell- und Ziel-IP kopieren" />
           <${CopyButton} text=${summaryText} label="Zusammenfassung" title="Alert als Text kopieren" />
           ${onFlag && html`<button class="btn" onClick=${onFlag}>Als harmlos markieren</button>`}
+          ${onRule && html`<button class="btn" onClick=${onRule}>Regel zum Sperren erstellen …</button>`}
         </div>
 
         <div class="ctx-bar">
@@ -802,10 +810,16 @@
   }
 
   function SignaturesPage({ hours, tick, refresh, goAlerts }) {
+    const isAdmin = React.useContext(AdminCtx);
     const [showHarmless, setShowHarmless] = useState(false);
+    const [rulesTick, setRulesTick] = useState(0);
     const { data, error } = useApi(`/api/signatures?hours=${hours}&include_harmless=${showHarmless ? 1 : 0}`, [tick]);
     const { data: flags } = useApi("/api/flags", [tick]);
+    const { data: ownRules } = useApi(isAdmin ? "/api/rules" : null, [tick, rulesTick]);
     const { flag, unflag, dialog } = useFlagging(refresh);
+    const { openRule, ruleDialog } = useRuleDialog(() => setRulesTick((t) => t + 1));
+    const blockedBy = {};
+    ((ownRules && ownRules.rules) || []).forEach((r) => { if (r.managed && r.original_sid) blockedBy[r.original_sid] = r; });
     return html`<div>
       <div class="card mb">
         <div class="card-head">
@@ -826,7 +840,8 @@
                 <div class="sig">${s.signature}
                   ${s.is_new && !s.harmless ? html` <span class="badge new">NEU</span>` : null}
                   ${s.verdict === "malicious" || s.verdict === "suspicious" ? html` <span class=${"rep " + s.verdict}>${VERDICTS[s.verdict].icon} ${VERDICTS[s.verdict].label}</span>` : null}
-                  ${s.harmless ? html` <span class="badge harmless">harmlos</span>` : null}</div>
+                  ${s.harmless ? html` <span class="badge harmless">harmlos</span>` : null}
+                  ${blockedBy[s.sid] ? html` <span class=${"badge " + (blockedBy[s.sid].enabled ? "blocked" : "harmless")} title=${"eigene Regel SID " + blockedBy[s.sid].sid}>${blockedBy[s.sid].enabled ? "eigene " + blockedBy[s.sid].action + "-Regel" : "eigene Regel deaktiviert"}</span>` : null}</div>
                 <div class="cat"><button class="link" onClick=${() => goAlerts({ sid: s.sid })}>SID ${s.gid}:${s.sid}</button>${s.category ? " · " + s.category : ""}${s.note ? " · „" + s.note + "“" : ""}</div>
               </td>
               <td><${Severity} s=${s.severity} /></td>
@@ -837,9 +852,10 @@
                 ${s.src_count > 1 || s.dest_count > 1 ? html`<div class="cat">${s.src_count} Quellen, ${s.dest_count} Ziele</div>` : null}</td>
               <td class="nowrap">${fmtDateTime(s.first_seen)}</td>
               <td class="nowrap">${fmtAgo(s.last_seen)}</td>
-              <td>${s.harmless
+              <td class="nowrap">${s.harmless
                 ? html`<button class="btn" onClick=${() => unflag(s)}>Markierung aufheben</button>`
-                : html`<button class="btn" onClick=${() => flag(s)}>Harmlos</button>`}</td>
+                : html`<button class="btn" onClick=${() => flag(s)}>Harmlos</button>`}
+                ${isAdmin && html` <button class="btn" title="drop/reject-Regel in local.rules anlegen" onClick=${() => openRule({ gid: s.gid, sid: s.sid, signature: s.signature })}>Sperren …</button>`}</td>
             </tr>`)}</tbody>
         </table></div>`}
       </div>
@@ -860,7 +876,279 @@
           </tr>`)}</tbody>
         </table></div>`}
       </div>
+      ${isAdmin && html`<div class="mb-top"><${OwnRulesCard} tick=${tick + rulesTick} onChanged=${() => setRulesTick((t) => t + 1)} /></div>`}
       ${dialog}
+      ${ruleDialog}
+    </div>`;
+  }
+
+  // ------------------------------------------------------------------ Eigene Regeln (local.rules)
+
+  const RULE_KINDS = [
+    ["sig", "Signatur blockieren", "Kopie der Originalregel als drop/reject-Regel mit eigener SID"],
+    ["ip", "IP-Adresse sperren", "sämtlicher Verkehr von und zu dieser Adresse"],
+    ["domain", "Domain sperren", "DNS-Anfragen, TLS (SNI) und HTTP für die Domain und alle Subdomains"],
+  ];
+
+  function RuleEnvWarnings({ env, compact }) {
+    if (!env) return null;
+    const snippet = "rule-files:\n  - suricata.rules\n  - " + env.local_rules;
+    return html`<div class="rule-env">
+      ${env.file.error && html`<div class="err">${env.local_rules}: ${env.file.error}</div>`}
+      ${!env.file.error && !env.file.exists && html`<div class="warnmsg"><span class="mono">${env.local_rules}</span> gibt es noch nicht. Die Datei wird beim ersten Speichern angelegt.</div>`}
+      ${env.yaml.error
+        ? html`<div class="warnmsg"><span class="mono">${env.suricata_yaml}</span>: ${env.yaml.error}. Ob Suricata die eigene Regeldatei lädt, lässt sich so nicht prüfen. Den Pfad zu suricata.yaml kannst du in den Einstellungen ändern.</div>`
+        : !env.loaded && html`<div class="warnmsg"><b>Suricata lädt <span class="mono">${env.local_rules}</span> nicht.</b>${" "}
+            Die Datei fehlt in <span class="mono">${env.suricata_yaml}</span> unter <span class="mono">rule-files</span>. Ohne diesen Eintrag bleiben eigene Regeln wirkungslos.
+            ${!compact && html`<div style=${{ marginTop: 6 }}>Ergänzen und Suricata einmal neu starten (<span class="mono">sudo systemctl restart suricata</span>):</div>
+            <pre class="json">${snippet}</pre>
+            <div class="cat">Relative Namen sucht Suricata in <span class="mono">default-rule-path</span> (${env.yaml.default_rule_path || "nicht gesetzt"}), deshalb den vollen Pfad eintragen. suricata-update ändert suricata.yaml nicht, der Eintrag bleibt also erhalten.</div>`}</div>`}
+      ${!env.ips_seen && html`<div class="cat">Hinweis: Bisher wurde kein Alert blockiert. drop und reject wirken nur, wenn Suricata als IPS läuft (inline, z. B. mit NFQUEUE). Im reinen IDS-Modus melden diese Regeln nur.</div>`}
+    </div>`;
+  }
+
+  function ReloadStatus({ st }) {
+    if (!st) return null;
+    const cls = st.running ? "warnmsg" : st.ok ? "okmsg" : st.ok === false ? "err" : "warnmsg";
+    return html`<div class=${cls}>${st.running ? "⟳ " : ""}${st.message}
+      ${st.failed && st.failed.length ? html`<ul>${st.failed.map((f) => html`<li key=${f.sid} class="mono" style=${{ fontSize: 12 }}>SID ${f.sid}: ${f.rule}</li>`)}</ul>` : null}
+      ${!st.running && st.ts ? html` <span class="cat">(${fmtDateTime(st.ts)})</span>` : null}</div>`;
+  }
+
+  // Status des Neuladens abfragen, solange es laeuft
+  function useReload(initial) {
+    const [st, setSt] = useState(initial || null);
+    useEffect(() => {
+      if (!st || !st.running) return;
+      const t = setTimeout(() => api("/api/rules").then((r) => setSt(r.reload)).catch(() => {}), 2000);
+      return () => clearTimeout(t);
+    }, [st]);
+    return [st, setSt];
+  }
+
+  function RuleDialog({ source, onClose, onDone }) {
+    const q = source.alertId ? "alert_id=" + source.alertId : `gid=${source.gid}&sid=${source.sid}`;
+    const { data, error } = useApi("/api/rules/suggest?" + q);
+    const [kind, setKind] = useState(null);
+    const [ip, setIp] = useState("");
+    const [domain, setDomain] = useState("");
+    const [action, setAction] = useState("drop");
+    const [note, setNote] = useState("");
+    const [reload, setReload] = useState(true);
+    const [preview, setPreview] = useState(null);
+    const [busy, setBusy] = useState(false);
+    const [saved, setSaved] = useState(null);
+    const [reloadSt, setReloadSt] = useReload(null);
+    useEffect(() => {
+      const h = (e) => e.key === "Escape" && onClose();
+      window.addEventListener("keydown", h);
+      return () => window.removeEventListener("keydown", h);
+    }, []);
+    useEffect(() => {
+      if (!data) return;
+      setKind(data.original ? "sig" : "ip");
+      const ext = data.ips.find((x) => x.global) || data.ips[0];
+      setIp(ext ? ext.ip : "");
+      setDomain(data.domains[0] || "");
+    }, [data]);
+    const body = { kind, action, note, sid: data && data.sid, ip, domain, reload };
+    useEffect(() => {
+      if (!data || !kind || saved) return;
+      setPreview(null);
+      const t = setTimeout(() => postJson("/api/rules/build", body)
+        .then((r) => setPreview({ rules: r.rules })).catch((e) => setPreview({ error: e.message })), 300);
+      return () => clearTimeout(t);
+    }, [data, kind, ip, domain, action, note]);
+
+    const save = async () => {
+      setBusy(true);
+      try {
+        const r = await postJson("/api/rules/add", body);
+        setSaved(r.rules);
+        setReloadSt(r.reload);
+        onDone && onDone();
+      } catch (e) { setPreview({ error: e.message }); }
+      setBusy(false);
+    };
+    const env = data && data.env;
+    const ipInfo = data && data.ips.find((x) => x.ip === ip);
+    const title = (data && data.signature) || source.signature || (data ? "SID " + data.gid + ":" + data.sid : "");
+    return html`<div class="modal-bg" onClick=${(e) => e.target === e.currentTarget && onClose()}>
+      <div class="modal rule-modal" role="dialog" aria-modal="true" aria-label="Regel erstellen">
+        <div class="detail-head">
+          <div><h3>Regel zum Blockieren erstellen</h3>
+            <div class="cat">${title}${data ? " · SID " + data.gid + ":" + data.sid : ""}</div></div>
+          <button class="icon-btn" title="Schließen (Esc)" onClick=${onClose}>✕</button>
+        </div>
+        ${error && html`<div class="err">${error}</div>`}
+        ${!data && !error && html`<div class="empty">lädt …</div>`}
+        ${data && !saved && html`
+          <${RuleEnvWarnings} env=${env} />
+          ${data.existing.length > 0 && html`<div class="warnmsg">Dazu gibt es schon eigene Regeln:
+            <ul>${data.existing.map((r) => html`<li key=${r.sid}>SID ${r.sid}: ${r.msg}${r.enabled ? "" : " (deaktiviert)"}</li>`)}</ul></div>`}
+
+          <div class="field"><label>Was soll blockiert werden?</label>
+            <div class="rule-kinds">${RULE_KINDS.map(([k, label, hint]) => {
+              const off = (k === "sig" && !data.original) || (k === "ip" && !data.ips.length);
+              return html`<label key=${k} class=${"rule-kind" + (kind === k ? " active" : "") + (off ? " off" : "")}>
+                <input type="radio" name="rk" checked=${kind === k} disabled=${off && k === "sig"} onChange=${() => setKind(k)} />
+                <span><b>${label}</b><br /><span class="cat">${k === "sig" && !data.original
+                  ? "Originalregel nicht gefunden in " + env.rules_dir + " (Ordner in den Einstellungen prüfen)" : hint}</span></span></label>`;
+            })}</div></div>
+
+          ${kind === "sig" && data.original && html`<div class="field"><label>Originalregel</label>
+            <pre class="json rule-text">${data.original.text}</pre>
+            <div class="cat">aus ${data.original.file}, Zeile ${data.original.line}${data.original.enabled ? "" : " (dort auskommentiert)"}. Die Originalregel bleibt unverändert und meldet weiter. Die Kopie blockiert zusätzlich.</div></div>`}
+
+          ${kind === "ip" && html`<div class="field"><label>IP-Adresse</label>
+            <div class="candidates">${data.ips.map((x) => html`<label key=${x.ip} class="radio-line">
+              <input type="radio" name="rip" checked=${ip === x.ip} onChange=${() => setIp(x.ip)} />
+              <span class="mono">${x.ip}</span> <${DevName} ip=${x.ip} />
+              <span class="cat">${x.global ? (x.names.length ? x.names.slice(0, 3).join(", ") : "extern") : "lokales Gerät"}</span></label>`)}</div>
+            <input type="text" class="mono" spellcheck="false" value=${ip} onInput=${(e) => setIp(e.target.value.trim())} placeholder="oder Adresse eingeben" />
+            ${ipInfo && !ipInfo.global && html`<div class="warnmsg">Das ist eine Adresse im eigenen Netz. Die Regel sperrt den gesamten Verkehr dieses Geräts, auch ins Internet.</div>`}</div>`}
+
+          ${kind === "domain" && html`<div class="field"><label>Domain</label>
+            <input type="text" class="mono" spellcheck="false" list="rule-domains" value=${domain}
+              onInput=${(e) => setDomain(e.target.value.trim())} placeholder="z. B. example.com" />
+            <datalist id="rule-domains">${data.domains.map((d) => html`<option key=${d} value=${d} />`)}</datalist>
+            <div class="cat">${data.domains.length ? "Bekannte Namen der beteiligten IPs: " + data.domains.join(", ") : "Für die beteiligten IPs sind keine Hostnamen bekannt."} Subdomains werden mit gesperrt.</div></div>`}
+
+          <div class="inline-form">
+            <div class="field"><label>Aktion</label>
+              <div class="seg">
+                <button class=${action === "drop" ? "active" : ""} onClick=${() => setAction("drop")}>drop</button>
+                <button class=${action === "reject" ? "active" : ""} onClick=${() => setAction("reject")}>reject</button>
+              </div>
+              <div class="cat">${action === "drop" ? "verwirft die Pakete still" : "verwirft und schickt einen TCP-Reset bzw. ICMP-Fehler: Programme brechen sofort ab statt zu warten"}</div></div>
+            <div class="field"><label>Notiz (optional)</label>
+              <input type="text" value=${note} maxLength="80" onInput=${(e) => setNote(e.target.value)} placeholder="z. B. Tracking im Smart-TV" /></div>
+          </div>
+
+          <div class="field"><label>Vorschau für <span class="mono">${env.local_rules}</span></label>
+            ${!preview ? html`<div class="cat">…</div>` : preview.error ? html`<div class="err">${preview.error}</div>`
+              : html`<pre class="json rule-text">${preview.rules.map((r) => r.text).join("\n")}</pre>`}</div>
+
+          <div class="field"><label class="switch"><input type="checkbox" checked=${reload && env.rules_reload !== "none"} disabled=${env.rules_reload === "none"}
+            onChange=${(e) => setReload(e.target.checked)} /><span class="slider"></span> Suricata danach die Regeln neu laden lassen</label>
+            ${env.rules_reload === "none" && html`<div class="cat">Automatisches Neuladen ist in den Einstellungen abgeschaltet.</div>`}</div>
+          <div class="actions">
+            <button class="btn" onClick=${onClose}>Abbrechen</button>
+            <button class="btn primary" disabled=${busy || !preview || !!preview.error || !!env.file.error} onClick=${save}>Regel speichern</button>
+          </div>`}
+        ${saved && html`
+          <div class="okmsg">Gespeichert in <span class="mono">${env.local_rules}</span>: SID ${saved.map((r) => r.sid).join(", ")}</div>
+          ${reloadSt ? html`<${ReloadStatus} st=${reloadSt} />` : html`<div class="warnmsg">Suricata wurde nicht neu geladen. Die Regel wirkt erst nach <span class="mono">sudo suricatasc -c reload-rules</span> oder einem Neustart von Suricata.</div>`}
+          ${!env.loaded && html`<${RuleEnvWarnings} env=${env} compact />`}
+          <div class="actions"><button class="btn primary" onClick=${onClose}>Schließen</button></div>`}
+      </div>
+    </div>`;
+  }
+
+  // Dialog-Steuerung fuer Alert-Tabellen und Signaturen
+  function useRuleDialog(after) {
+    const [src, setSrc] = useState(null);
+    const dialog = src ? html`<${RuleDialog} key=${JSON.stringify(src)} source=${src}
+      onClose=${() => setSrc(null)} onDone=${after} />` : null;
+    return { openRule: setSrc, ruleDialog: dialog };
+  }
+
+  function OwnRulesCard({ tick, onChanged }) {
+    const [reloadTick, setReloadTick] = useState(0);
+    const { data, error } = useApi("/api/rules", [tick, reloadTick]);
+    const [reloadSt, setReloadSt] = useReload(null);
+    const [busy, setBusy] = useState(false);
+    const [showOther, setShowOther] = useState(false);
+    useEffect(() => { if (data && data.reload && !reloadSt) setReloadSt(data.reload); }, [data]);
+    const act = async (path, body, question) => {
+      if (question && !confirm(question)) return;
+      setBusy(true);
+      try {
+        const r = await postJson(path, body);
+        if (r.reload) setReloadSt(r.reload);
+      } catch (e) { alert(e.message); }
+      setBusy(false);
+      setReloadTick((t) => t + 1);
+      onChanged && onChanged();
+    };
+    if (!data) return html`<div class="card">${error ? html`<div class="err">${error}</div>` : html`<div class="empty">lädt …</div>`}</div>`;
+    const own = data.rules.filter((r) => r.managed);
+    const other = data.rules.filter((r) => !r.managed);
+    return html`<div class="card">
+      <div class="card-head">
+        <div><h2>Eigene Blockier-Regeln</h2>
+          <div class="sub">Im Dashboard angelegte Regeln in <span class="mono">${data.local_rules}</span>. Neue Regeln erstellst du über „Sperren …“ bei einem Alert oder einer Signatur.</div></div>
+        <button class="btn" disabled=${busy || data.rules_reload === "none" || (reloadSt && reloadSt.running)} onClick=${() => act("/api/rules/reload", {})}>Suricata neu laden</button>
+      </div>
+      <${RuleEnvWarnings} env=${data} />
+      <${ReloadStatus} st=${reloadSt} />
+      ${!own.length ? html`<div class="empty">Noch keine eigenen Regeln.</div>` : html`
+      <div class="table-wrap"><table>
+        <thead><tr><th>SID</th><th>Aktion</th><th>Regel</th><th>Angelegt</th><th></th></tr></thead>
+        <tbody>${own.map((r) => html`<tr key=${r.sid} class=${r.enabled ? "" : "harmless"}>
+          <td class="mono">${r.sid}</td>
+          <td><span class=${"badge " + (r.action === "drop" || r.action.startsWith("reject") ? "blocked" : "allowed")}>${r.action}</span></td>
+          <td><div class="sig">${r.msg}${r.enabled ? null : html` <span class="badge harmless">deaktiviert</span>`}</div>
+            <details><summary class="cat">Regeltext</summary><pre class="json rule-text">${r.text}</pre></details></td>
+          <td class="nowrap">${r.created ? r.created.replace(/_/g, "-") : "–"}</td>
+          <td class="nowrap">
+            <button class="btn" disabled=${busy} onClick=${() => act("/api/rules/modify", { sid: r.sid, op: r.enabled ? "disable" : "enable" })}>${r.enabled ? "Deaktivieren" : "Aktivieren"}</button>${" "}
+            <button class="btn" disabled=${busy} onClick=${() => act("/api/rules/modify", { sid: r.sid, op: "delete" }, "Regel SID " + r.sid + " endgültig aus " + data.local_rules + " löschen?")}>Löschen</button></td>
+        </tr>`)}</tbody>
+      </table></div>`}
+      ${other.length > 0 && html`<div style=${{ marginTop: 10 }}>
+        <button class="link" onClick=${() => setShowOther(!showOther)}>${showOther ? "▾" : "▸"} ${other.length} weitere Regel${other.length === 1 ? "" : "n"} in der Datei (von Hand angelegt, werden hier nicht verändert)</button>
+        ${showOther && html`<pre class="json rule-text" style=${{ marginTop: 6 }}>${other.map((r) => (r.enabled ? "" : "# ") + r.text).join("\n")}</pre>`}</div>`}
+    </div>`;
+  }
+
+  function RulesSettings() {
+    const [st, setSt] = useState(null);
+    const [form, setForm] = useState(null);
+    const [msg, setMsg] = useState(null);
+    const [busy, setBusy] = useState(false);
+    const load = (s) => {
+      setSt(s);
+      setForm({ rules_dir: s.rules_dir, local_rules: s.local_rules, suricata_yaml: s.suricata_yaml, rules_reload: s.rules_reload });
+    };
+    useEffect(() => { api("/api/rules").then(load).catch((e) => setMsg({ err: true, text: e.message })); }, []);
+    if (!form) return html`<div class="card settings">${msg ? html`<div class="err">${msg.text}</div>` : html`<div class="empty">lädt …</div>`}</div>`;
+    const set = (k) => (e) => { setForm({ ...form, [k]: e.target ? e.target.value : e }); setMsg(null); };
+    const save = async () => {
+      setBusy(true);
+      try { load(await postJson("/api/rules/settings", form)); setMsg({ err: false, text: "Gespeichert." }); }
+      catch (e) { setMsg({ err: true, text: e.message }); }
+      setBusy(false);
+    };
+    const changed = ["rules_dir", "local_rules", "suricata_yaml", "rules_reload"].some((k) => form[k] !== st[k]);
+    const okBad = (ok, text) => html`<div class=${"check " + (ok ? "ok" : "bad")}>${ok ? "✓ " : "✗ "}${text}</div>`;
+    return html`<div class="card settings">
+      <h2>Suricata-Regeln</h2>
+      <div class="sub">Für „Sperren …“ bei Alerts und Signaturen: Das Dashboard schreibt eigene drop/reject-Regeln in deine eigene Regeldatei und lässt Suricata sie neu laden.</div>
+      <div class="field"><label>Ordner mit den offiziellen Regeln</label>
+        <input type="text" class="mono" spellcheck="false" value=${form.rules_dir} onInput=${set("rules_dir")} />
+        ${form.rules_dir === st.rules_dir && okBad(st.rules_dir_ok, st.rules_dir_ok ? "Ordner gefunden" : "Ordner nicht gefunden")}
+        <div class="cat">Hier sucht das Dashboard den Originaltext einer Signatur (alle *.rules-Dateien). Bei suricata-update meist <span class="mono">/var/lib/suricata/rules</span>.</div></div>
+      <div class="field"><label>Eigene Regeldatei</label>
+        <input type="text" class="mono" spellcheck="false" value=${form.local_rules} onInput=${set("local_rules")} />
+        ${form.local_rules === st.local_rules && (st.file.error ? okBad(false, st.file.error)
+          : okBad(true, st.file.exists ? "beschreibbar" : "wird beim ersten Speichern angelegt"))}
+        <div class="cat">Das Dashboard hängt neue Regeln an und ändert nur Regeln, die es selbst angelegt hat. Deine übrigen Zeilen bleiben unangetastet. Vor jeder Änderung liegt eine Kopie in <span class="mono">data/${(form.local_rules.split("/").pop() || "local.rules")}.bak</span>.</div></div>
+      <div class="field"><label>suricata.yaml</label>
+        <input type="text" class="mono" spellcheck="false" value=${form.suricata_yaml} onInput=${set("suricata_yaml")} />
+        ${form.suricata_yaml === st.suricata_yaml && form.local_rules === st.local_rules && (st.yaml.error ? okBad(false, st.yaml.error)
+          : okBad(st.loaded, st.loaded ? "eigene Regeldatei steht unter rule-files" : "eigene Regeldatei fehlt unter rule-files"))}
+        <div class="cat">Nur zum Prüfen, ob Suricata die eigene Regeldatei lädt. Das Dashboard ändert suricata.yaml nicht.</div></div>
+      <div class="field"><label>Suricata nach Änderungen neu laden</label>
+        <div class="seg">${[["suricatasc", "suricatasc reload-rules"], ["usr2", "USR2-Signal"], ["none", "nicht automatisch"]].map(([v, l]) => html`
+          <button key=${v} class=${form.rules_reload === v ? "active" : ""} onClick=${() => set("rules_reload")(v)}>${l}</button>`)}</div>
+        <div class="cat">${form.rules_reload === "suricatasc" ? html`Braucht <span class="mono">unix-command: enabled: yes</span> in suricata.yaml (Standard bei Debian). Meldet zurück, ob Suricata eine Regel abgelehnt hat.`
+          : form.rules_reload === "usr2" ? "Schickt Suricata das Signal USR2. Fehler stehen nur in suricata.log."
+          : html`Du lädst selbst neu, z. B. mit <span class="mono">sudo suricatasc -c reload-rules</span>.`}
+          ${" "}Das Dashboard braucht dafür Root-Rechte (Standard im mitgelieferten systemd-Dienst).</div></div>
+      <${RuleEnvWarnings} env=${st} />
+      ${msg && html`<div class=${msg.err ? "err" : "okmsg"}>${msg.text}</div>`}
+      <div class="actions"><button class="btn primary" disabled=${busy || !changed} onClick=${save}>Speichern</button></div>
     </div>`;
   }
 
@@ -1789,7 +2077,7 @@ outputs:
 
   // ------------------------------------------------------------------ Sichern & Wiederherstellen
 
-  const SECTION_ORDER = ["settings", "device_names", "flags", "fp_notes", "anomaly_mutes", "feeds", "users"];
+  const SECTION_ORDER = ["settings", "device_names", "flags", "fp_notes", "anomaly_mutes", "feeds", "rules", "users"];
 
   function ImportPreview({ doc, source, labels, onCancel }) {
     const present = SECTION_ORDER.filter((k) => doc[k] != null);
@@ -1891,7 +2179,7 @@ outputs:
 
     return html`<div class="card settings" ref=${cardRef}>
       <h2>Sichern & Wiederherstellen</h2>
-      <div class="sub">Alles, was du selbst eingegeben hast: Pfade und HTTPS-Einstellung, Gerätenamen, harmlos markierte Signaturen, Fingerprint-Notizen, Feed-Auswahl und optional die Benutzer. Alles andere lernt das Dashboard aus eve.json neu.</div>
+      <div class="sub">Alles, was du selbst eingegeben hast: Pfade und HTTPS-Einstellung, Gerätenamen, harmlos markierte Signaturen, Fingerprint-Notizen, Feed-Auswahl, die im Dashboard angelegten Blockier-Regeln und optional die Benutzer. Alles andere lernt das Dashboard aus eve.json neu.</div>
 
       <div class="field"><label>Exportieren</label>
         <label class="switch"><input type="checkbox" checked=${withUsers} onChange=${(e) => setWithUsers(e.target.checked)} /><span class="slider"></span>
@@ -1928,6 +2216,7 @@ outputs:
   function SettingsPage({ refresh, me, restoreReq }) {
     return html`<div>
       <${LogSettings} refresh=${refresh} />
+      <${RulesSettings} />
       ${me.auth_enabled && html`<${UsersCard} me=${me} />`}
       <${HttpsCard} />
       <${DataCard} restoreReq=${restoreReq} />
@@ -2586,7 +2875,7 @@ outputs:
     ].filter(Boolean);
     const fileProblem = status && (status.files.eve_json.error ||
       (status.files.fast_log.used && status.files.fast_log.error));
-    return html`<${DevCtx.Provider} value=${devCtx}>
+    return html`<${AdminCtx.Provider} value=${isAdmin}><${DevCtx.Provider} value=${devCtx}>
       <header><div class="bar">
         <div class="brand"><i class=${"dot" + (stale ? " stale" : "")} title=${stale ? "Keine aktuellen Daten" : "Einlesen läuft"}></i>Suricata IPS</div>
         <nav>${tabs.map(([id, label, count]) => html`
@@ -2636,7 +2925,7 @@ outputs:
       </main>
       ${pwOpen && html`<${PasswordModal} me=${me} onClose=${() => setPwOpen(false)}
         onDone=${() => setPwOpen(false)} />`}
-      </${DevCtx.Provider}>`;
+      </${DevCtx.Provider}></${AdminCtx.Provider}>`;
   }
 
   ReactDOM.createRoot(document.getElementById("root")).render(html`<${App} />`);

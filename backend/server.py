@@ -41,8 +41,9 @@ from auth import Auth, AuthError
 import tls
 import userdata
 import anomaly
+import rules as rulesmod
 
-VERSION = "1.9.2"
+VERSION = "1.10.0"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(BASE_DIR)
@@ -89,6 +90,13 @@ DEFAULT_CONFIG = {
     # Optional: Warnungen per HTTP-POST verschicken, z. B. "https://ntfy.sh/mein-geheimes-thema"
     "anomaly_notify_url": "",
     "anomaly_notify_min_severity": "medium",
+    # Own blocking rules: where the official rules are (to look up the original rule of a SID),
+    # the own rules file the dashboard writes to, suricata.yaml (to check rule-files) and
+    # how Suricata is told to reload: "suricatasc", "usr2" or "none"
+    "rules_dir": "/var/lib/suricata/rules",
+    "local_rules": "/etc/suricata/rules/local.rules",
+    "suricata_yaml": "/etc/suricata/suricata.yaml",
+    "rules_reload": "suricatasc",
 }
 
 log = logging.getLogger("suricata-dashboard")
@@ -1032,6 +1040,9 @@ class Api:
         self.auth = None    # von main gesetzt
         self.backup = None  # userdata.AutoBackup, von main gesetzt
         self.detector = None  # anomaly.Detector, von main gesetzt
+        self.rule_index = rulesmod.RuleIndex()
+        self.rules_file = rulesmod.RulesFile(os.path.dirname(cfg["db_path"]))
+        self.reloader = rulesmod.Reloader()
 
     @contextlib.contextmanager
     def db(self):
@@ -2161,6 +2172,13 @@ class Api:
                 f = self.intel.feeds.get(fid)
                 if f and f["enabled"] != bool(on):
                     self.intel.set_enabled(fid, bool(on))
+        if settings:
+            self.cfg.update({k: v for k, v in settings.items() if k in self.RULE_SETTING_KEYS})
+        if "rules" in sections:
+            try:
+                summary["rules"] = userdata.apply_rules(self.cfg, doc, os.path.dirname(self.cfg["db_path"]))
+            except (OSError, ValueError) as e:
+                notes.append("Regeln nicht übernommen: %s" % e)
         if "users" in sections and self.auth:
             self.auth._forget_cache()
         self._dev_cache = (0, None)
@@ -2172,6 +2190,162 @@ class Api:
         return {"ok": True, "summary": summary, "notes": notes, "restarting": restart,
                 "scheme": "https" if self.cfg["https"] else "http",
                 "port": self.cfg["https_port"] if self.cfg["https"] else self.cfg["listen_port"]}
+
+    # ---- Own blocking rules (local.rules) -------------------------------------
+
+    RULE_SETTING_KEYS = ("rules_dir", "local_rules", "suricata_yaml", "rules_reload")
+
+    def _rules_env(self):
+        cfg = self.cfg
+        yml = rulesmod.read_suricata_yaml(cfg["suricata_yaml"])
+        loaded, resolved = rulesmod.check_loaded(yml, cfg["local_rules"])
+        with self.db() as c:
+            ips = c.execute("SELECT 1 FROM alerts WHERE action='blocked' LIMIT 1").fetchone() is not None
+        return {
+            "rules_dir": cfg["rules_dir"], "local_rules": cfg["local_rules"],
+            "suricata_yaml": cfg["suricata_yaml"], "rules_reload": cfg["rules_reload"],
+            "file": rulesmod.file_status(cfg["local_rules"]),
+            "rules_dir_ok": os.path.isdir(cfg["rules_dir"]),
+            "yaml": {"exists": yml["exists"], "readable": yml["readable"], "error": yml["error"],
+                     "default_rule_path": yml["default_rule_path"], "rule_files": resolved},
+            "loaded": loaded,
+            "ips_seen": ips,
+            "reload": self.reloader.status(),
+        }
+
+    def rules_status(self, q):
+        out = self._rules_env()
+        try:
+            out["rules"] = rulesmod.read_rules(self.cfg["local_rules"])
+        except OSError as e:
+            out["rules"] = []
+            out["file"]["error"] = "nicht lesbar: %s" % e
+        return out
+
+    def rules_suggest(self, q):
+        """Options for a new rule from an alert (?alert_id=) or a signature (?gid=&sid=)."""
+        ips = []
+        if q.get("alert_id"):
+            with self.db() as c:
+                a = c.execute("SELECT * FROM alerts WHERE id=?", (int(q["alert_id"][0]),)).fetchone()
+            if not a:
+                raise KeyError("Alert nicht gefunden")
+            gid, sid, signature = a["gid"], a["sid"], a["signature"]
+            ips = [a["src_ip"], a["dest_ip"]]
+        else:
+            gid, sid = int(q.get("gid", ["1"])[0]), int(q["sid"][0])
+            with self.db() as c:
+                row = c.execute("SELECT signature FROM signatures WHERE gid=? AND sid=?", (gid, sid)).fetchone()
+                signature = row["signature"] if row else None
+                for r in c.execute("SELECT ip, COUNT(*) n FROM (SELECT src_ip ip FROM alerts WHERE gid=? AND sid=? "
+                                   "UNION ALL SELECT dest_ip FROM alerts WHERE gid=? AND sid=?) "
+                                   "WHERE ip IS NOT NULL GROUP BY ip ORDER BY n DESC LIMIT 8",
+                                   (gid, sid, gid, sid)):
+                    ips.append(r["ip"])
+        ips = [ip for i, ip in enumerate(ips) if ip and ip not in ips[:i]]
+        cfg = self.cfg
+        original = None
+        try:
+            original = self.rule_index.find(cfg["rules_dir"], cfg["local_rules"], sid)
+        except OSError:
+            pass
+        with self.db() as c:
+            names = self.names_for(c, ips)
+        cand_ips = [{"ip": ip, "global": is_global(ip), "names": [n["name"] for n in names.get(ip, [])][:5]}
+                    for ip in ips]
+        cand_ips.sort(key=lambda x: not x["global"])
+        domains = []
+        for x in cand_ips:
+            for n in x["names"]:
+                with contextlib.suppress(ValueError):
+                    d = rulesmod.norm_domain(n)
+                    if d not in domains:
+                        domains.append(d)
+        own = []
+        with contextlib.suppress(OSError):
+            own = [r for r in rulesmod.read_rules(cfg["local_rules"]) if r["managed"]]
+        return {
+            "gid": gid, "sid": sid, "signature": signature,
+            "original": original, "ips": cand_ips, "domains": domains[:12],
+            "existing": [r for r in own if r["original_sid"] == sid or r["target"] in ips or r["target"] in domains],
+            "env": self._rules_env(),
+        }
+
+    def _rule_request(self, body):
+        cfg = self.cfg
+        kind = body.get("kind")
+        action = body.get("action", "drop")
+        own = rulesmod.read_rules(cfg["local_rules"])
+        taken = {r["sid"] for r in own}
+        first = self.rule_index.next_sid(cfg["rules_dir"], cfg["local_rules"], taken)
+        # domain rules need three consecutive free SIDs
+        while kind == "domain" and any(self.rule_index.has(cfg["rules_dir"], cfg["local_rules"], first + i)
+                                       or first + i in taken for i in range(3)):
+            first += 1
+        original = None
+        if kind == "sig":
+            original = self.rule_index.find(cfg["rules_dir"], cfg["local_rules"], int(body["sid"]))
+            if not original:
+                raise rulesmod.RuleError("Die Regel mit SID %s wurde in %s nicht gefunden" % (body["sid"], cfg["rules_dir"]))
+            if any(r["managed"] and r["original_sid"] == original["sid"] for r in own):
+                raise rulesmod.RuleError("Für SID %d gibt es schon eine eigene Regel" % original["sid"])
+        built = rulesmod.build(kind, action, first, note=body.get("note", ""), original=original,
+                               ip=body.get("ip"), domain=body.get("domain"))
+        target = None
+        if kind == "ip":
+            target = rulesmod.norm_ip(body.get("ip"))
+        elif kind == "domain":
+            target = rulesmod.norm_domain(body.get("domain"))
+        if target and any(r["managed"] and r["target"] == target for r in own):
+            raise rulesmod.RuleError("%s ist schon gesperrt" % target)
+        what = {"sig": "SID %s" % body.get("sid"), "ip": "IP %s" % target, "domain": "Domain %s" % target}[kind]
+        comment = "SD %s %s %s%s" % (time.strftime("%Y-%m-%d %H:%M"), action, what,
+                                     (" - " + rulesmod.clean_text(body.get("note"), 80)) if body.get("note") else "")
+        return built, comment
+
+    def rules_build(self, body):
+        built, comment = self._rule_request(body)
+        return {"comment": comment, "rules": [{"sid": sid, "text": t} for sid, t in built]}
+
+    def rules_add(self, body):
+        built, comment = self._rule_request(body)
+        self.rules_file.append(self.cfg["local_rules"], built, comment)
+        log.info("Eigene Regel(n) angelegt: %s", ", ".join(str(sid) for sid, _ in built))
+        out = {"ok": True, "rules": [{"sid": sid, "text": t} for sid, t in built], "reload": None}
+        if body.get("reload", True):
+            out["reload"] = self._reload_rules()
+        return out
+
+    def rules_modify(self, body):
+        op = body.get("op")
+        if op not in ("enable", "disable", "delete"):
+            raise rulesmod.RuleError("op muss enable, disable oder delete sein")
+        self.rules_file.modify(self.cfg["local_rules"], int(body["sid"]), op)
+        out = {"ok": True, "reload": None}
+        if body.get("reload", True):
+            out["reload"] = self._reload_rules()
+        return out
+
+    def _reload_rules(self):
+        own = [r["sid"] for r in rulesmod.read_rules(self.cfg["local_rules"])]
+        return self.reloader.start(self.cfg["rules_reload"], own)
+
+    def rules_reload(self, body):
+        return {"reload": self._reload_rules()}
+
+    def rules_save_settings(self, body):
+        changes = {}
+        for k in self.RULE_SETTING_KEYS:
+            if k in body:
+                changes[k] = body[k]
+        try:
+            changes = userdata._clean_settings(changes)
+        except ValueError as e:
+            raise rulesmod.RuleError(str(e))
+        if changes:
+            self._write_config(changes)
+            self.cfg.update(changes)
+        return self.rules_status({})
 
     # ---- HTTPS ---------------------------------------------------------------
 
@@ -2236,6 +2410,7 @@ class Api:
 PUBLIC_STATIC = {"/login", "/login.html", "/style.css"}
 # GET-Routen, die nur Admins sehen duerfen (Dateisystem, Benutzer, Server-Konfiguration)
 ADMIN_GET = {"/api/settings", "/api/settings/check", "/api/settings/find", "/api/users", "/api/https",
+             "/api/rules", "/api/rules/suggest",
              "/api/userdata/export", "/api/userdata/backups", "/api/userdata/backup"}
 FORBIDDEN_MSG = "Nur Administratoren dürfen das. Dein Konto hat die Rolle „Nur lesen“."
 
@@ -2295,6 +2470,8 @@ def make_handler(api, auth, is_tls=False):
         "/api/userdata/backup": api.userdata_backup,
         "/api/anomalies": api.anomalies,
         "/api/anomalies/device": api.anomaly_device,
+        "/api/rules": api.rules_status,
+        "/api/rules/suggest": api.rules_suggest,
     }
     post_routes = {
         "/api/flags": api.set_flag,
@@ -2309,6 +2486,11 @@ def make_handler(api, auth, is_tls=False):
         "/api/anomalies/ack": api.anomaly_ack,
         "/api/anomalies/mute": api.anomaly_mute,
         "/api/anomalies/check": api.anomaly_check_now,
+        "/api/rules/build": api.rules_build,
+        "/api/rules/add": api.rules_add,
+        "/api/rules/modify": api.rules_modify,
+        "/api/rules/reload": api.rules_reload,
+        "/api/rules/settings": api.rules_save_settings,
     }
     open_admin = {"username": "", "role": "admin", "must_change": False}
 
@@ -2458,6 +2640,8 @@ def make_handler(api, auth, is_tls=False):
                 return self.send_json(fn(parse_qs(u.query)))
             except KeyError as e:
                 return self.send_json({"error": "fehlt/unbekannt: %s" % e.args[0]}, 404)
+            except rulesmod.RuleError as e:
+                return self.send_json({"error": str(e)}, 400)
             except ValueError as e:
                 return self.send_json({"error": "ungueltiger Wert: %s" % e}, 400)
             except Exception as e:
@@ -2501,8 +2685,13 @@ def make_handler(api, auth, is_tls=False):
                 return self.send_json(fn(body))
             except AuthError as e:
                 return self.send_json({"error": str(e)}, e.code)
+            except rulesmod.RuleError as e:
+                return self.send_json({"error": str(e)}, 400)
             except (KeyError, ValueError, TypeError) as e:
                 return self.send_json({"error": "ungueltige Anfrage: %s" % e}, 400)
+            except OSError as e:
+                log.warning("Fehler bei %s: %s", path, e)
+                return self.send_json({"error": "Dateifehler: %s" % e}, 500)
 
         def do_DELETE(self):
             u = urlparse(self.path)

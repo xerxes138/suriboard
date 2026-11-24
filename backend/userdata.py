@@ -42,7 +42,7 @@ log = logging.getLogger("suricata-dashboard")
 
 FORMAT = "suricata-dashboard-userdata"
 FORMAT_VERSION = 1
-SECTIONS = ("settings", "device_names", "flags", "fp_notes", "anomaly_mutes", "feeds", "users")
+SECTIONS = ("settings", "device_names", "flags", "fp_notes", "anomaly_mutes", "feeds", "rules", "users")
 SECTION_LABELS = {
     "settings": "Einstellungen (Pfade, Alert-Quelle, HTTPS)",
     "device_names": "Gerätenamen",
@@ -50,12 +50,15 @@ SECTION_LABELS = {
     "fp_notes": "Notizen zu TLS-Fingerprints",
     "anomaly_mutes": "Stummgeschaltete Anomalie-Warnungen",
     "feeds": "Ein-/ausgeschaltete Threat-Feeds",
+    "rules": "Eigene Blockier-Regeln (aus local.rules)",
     "users": "Benutzer (mit Passwort-Hash)",
 }
 # Einstellungen, die im Browser geaendert werden und in data/settings.json liegen
-SETTING_KEYS = ("eve_json", "fast_log", "alert_source", "https", "https_port", "http_redirect")
+SETTING_KEYS = ("eve_json", "fast_log", "alert_source", "https", "https_port", "http_redirect",
+                "rules_dir", "local_rules", "suricata_yaml", "rules_reload")
 HTTPS_KEYS = ("https", "https_port", "http_redirect")
 CONTENT_SECTIONS = ("device_names", "flags", "fp_notes", "anomaly_mutes", "feeds")
+RULE_PATH_KEYS = ("rules_dir", "local_rules", "suricata_yaml")
 
 BACKUP_DIR = "backups"
 KEEP_BACKUPS = 20
@@ -103,6 +106,10 @@ def collect(cfg, conn, include_users=True):
     if row:
         with contextlib.suppress(ValueError):
             data["feeds"] = json.loads(row["value"])
+    with contextlib.suppress(Exception):   # rules file missing or unreadable -> section left out
+        import rules as rulesmod
+        own = [r for r in rulesmod.read_rules(cfg.get("local_rules")) if r["managed"]]
+        data["rules"] = [{"sid": r["sid"], "enabled": r["enabled"], "text": r["text"]} for r in own]
     if include_users:
         with contextlib.suppress(Exception):  # Tabelle fehlt bei sehr alten Datenbanken
             data["users"] = rows("SELECT username, pw_hash, role, must_change, created FROM users "
@@ -157,6 +164,18 @@ def _clean_settings(s):
         out["https_port"] = p
     if "http_redirect" in s:
         out["http_redirect"] = bool(s["http_redirect"])
+    for k in RULE_PATH_KEYS:
+        if k in s:
+            v = str(s[k]).strip()
+            if not os.path.isabs(v):
+                raise ValueError("%s: Pfad muss absolut sein" % k)
+            if k == "local_rules" and not v.endswith(".rules"):
+                raise ValueError("local_rules: Dateiname muss auf .rules enden")
+            out[k] = v
+    if "rules_reload" in s:
+        if s["rules_reload"] not in ("suricatasc", "usr2", "none"):
+            raise ValueError("rules_reload muss suricatasc, usr2 oder none sein")
+        out["rules_reload"] = s["rules_reload"]
     return out
 
 
@@ -385,6 +404,20 @@ SECTION_ALIASES = {"devices": "device_names", "geraete": "device_names", "signat
                    "fingerprints": "fp_notes"}
 
 
+def apply_rules(cfg, doc, backup_dir):
+    """Import of the "rules" section: adds dashboard rules whose SID is missing in local.rules.
+    Never deletes or changes existing lines (also not in replace mode)."""
+    import rules as rulesmod
+    items = doc.get("rules")
+    if not isinstance(items, list):
+        return 0
+    texts = []
+    for r in items:
+        if isinstance(r, dict) and isinstance(r.get("text"), str):
+            texts.append(("" if r.get("enabled", True) else "# ") + r["text"])
+    return rulesmod.RulesFile(backup_dir).restore_managed(cfg["local_rules"], texts)
+
+
 # --------------------------------------------------------------------------
 # Komplette Datenbank sichern/wiederherstellen (inkl. Anomalie-Lernprofilen)
 # --------------------------------------------------------------------------
@@ -569,6 +602,9 @@ def cli():
             else:
                 secs = [s for s in SECTIONS if s in doc]
             summary, settings = apply(conn, doc, secs, args.mode)
+            if "rules" in secs:
+                cfg.update(settings or {})
+                summary["rules"] = apply_rules(cfg, doc, os.path.dirname(cfg["db_path"]))
             if settings:
                 path = settings_path(cfg)
                 cur = {}

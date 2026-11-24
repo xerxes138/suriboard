@@ -1,5 +1,5 @@
 {
-  "_hinweis": "Vorlage. Bei Bedarf als config.json kopieren und anpassen. Alle Schluessel sind optional, fehlende nutzen die Standardwerte aus backend/server.py. Im Browser geaenderte Einstellungen (Pfade, HTTPS) liegen in data/settings.json und haben Vorrang.",
+  "_note": "Template. Copy to config.json and adjust if needed. All keys are optional; missing ones use the defaults from backend/server.py. Settings changed in the browser (paths, HTTPS, rules) are stored in data/settings.json and take precedence.",
   "listen_host": "0.0.0.0",
   "listen_port": 8080,
   "eve_json": "/var/log/suricata/eve.json",
@@ -9,5 +9,9 @@
   "poll_interval_seconds": 5,
   "retention_days": 30,
   "start_at_end": false,
-  "new_signature_hours": 24
+  "new_signature_hours": 24,
+  "rules_dir": "/var/lib/suricata/rules",
+  "local_rules": "/etc/suricata/rules/local.rules",
+  "suricata_yaml": "/etc/suricata/suricata.yaml",
+  "rules_reload": "suricatasc"
 }
