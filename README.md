@@ -6,6 +6,21 @@ A lightweight web dashboard for Suricata (IPS/IDS) on a Raspberry Pi, similar in
 - **Frontend:** React (with htm instead of JSX) and Chart.js. All libraries are bundled in `frontend/vendor/`, so there is **no build step**. Only the Pi itself needs internet access, to download threat feeds (optional, see below).
 - **Language:** the web interface is available in German and English. The **EN/DE** button at the top right (also on the login page) switches the language; on first visit the browser language decides. The choice is stored per browser. UI labels are quoted below in German with the English label where it helps. Command line tools and log messages are in German.
 
+![Overview](docs/screenshots/overview.png)
+
+<table>
+<tr>
+<td><a href="docs/screenshots/live.png"><img src="docs/screenshots/live.png" alt="Live view"></a><br><sub>Live view: devices and their current connections</sub></td>
+<td><a href="docs/screenshots/alert-details.png"><img src="docs/screenshots/alert-details.png" alt="Alert details"></a><br><sub>Alert details with reputation and eve.json context</sub></td>
+</tr>
+<tr>
+<td><a href="docs/screenshots/block-rule.png"><img src="docs/screenshots/block-rule.png" alt="Create blocking rule"></a><br><sub>Creating a blocking rule from an alert</sub></td>
+<td><a href="docs/screenshots/devices.png"><img src="docs/screenshots/devices.png" alt="Devices"></a><br><sub>Own names for local devices</sub></td>
+</tr>
+</table>
+
+<sub>Screenshots from a test instance with generated demo data.</sub>
+
 ## Features
 
 - **Overview („Übersicht“):** connections over time, stacked by application protocol (tls, dns, quic …) or transport protocol (TCP/UDP), switchable between flows and bytes. Plus key figures, an alert timeline and top lists (clients, destinations, ports, DNS queries, TLS SNI, HTTP hosts).
@@ -443,3 +458,7 @@ All calls except `POST /api/login` need the session cookie (otherwise `401`). Mo
 `GET /api/summary|traffic|protocols|top|alerts|alerts/timeline|signatures|flags|status|event_types?hours=24`
 `GET /api/alert_context?id=<alert-id>&before=60&after=300` · `GET /api/settings` · `GET /api/settings/check?path=…` · `GET /api/settings/find` · `POST /api/settings {"eve_json":"…","fast_log":"…","alert_source":"fastlog"}`
 `GET /api/live?hold=30&alerts=0&lan=1&groups=1` (enables the one-second interval for 20 s) · `GET /api/devices` · `GET /api/devices/names` · `POST /api/devices {"kind":"mac","key":"3c:22:fb:12:34:56","name":"Printer"}` (empty name deletes) · `POST /api/flags {"gid":1,"sid":2013504,"note":"apt"}` · `DELETE /api/flags?gid=1&sid=2013504`
+
+## License
+
+MIT, see [LICENSE](LICENSE). The bundled libraries in `frontend/vendor/` keep their own licenses, see [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).

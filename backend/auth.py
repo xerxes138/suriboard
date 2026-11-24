@@ -13,9 +13,9 @@ Kommandozeile (wie "pihole setpassword"):
 
     python3 backend/auth.py list
     python3 backend/auth.py passwd admin
-    python3 backend/auth.py add niklas --role admin
-    python3 backend/auth.py role niklas viewer
-    python3 backend/auth.py del niklas
+    python3 backend/auth.py add anna --role admin
+    python3 backend/auth.py role anna viewer
+    python3 backend/auth.py del anna
     python3 backend/auth.py logout-all
 """
 

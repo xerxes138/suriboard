@@ -413,6 +413,15 @@ Object.assign(window.I18N_EN, {
   "Alle Hosts": "All hosts",
 });
 
+Object.assign(window.I18N_EN, {
+  "(dort auskommentiert)": "(commented out there)", "· erledigt": "· done",
+  "(Benachrichtigung aufs Handy: anomaly_notify_url in config.json, siehe README)": "(phone notifications: anomaly_notify_url in config.json, see README)",
+  "JA3: TLS-Client-Fingerabdruck (MD5)": "JA3: TLS client fingerprint (MD5)", "JA3S: Antwort des Servers (MD5)": "JA3S: server response (MD5)",
+  "JA4: TLS-/QUIC-Client-Fingerabdruck": "JA4: TLS/QUIC client fingerprint", "JA4S: Antwort des Servers": "JA4S: server response",
+  "gelistet als {x}": "listed as {x}", "Version {x}": "version {x}", "{n} Flows, {b}": "{n} flows, {b}",
+  "· eingehend": "· incoming", "· aktiv": "· active", "· beendet": "· finished", "▶ weiter": "▶ resume", "❚❚ anhalten": "❚❚ pause",
+});
+
 // Messages with values: [regular expression, English replacement]. Captured groups are translated
 // again if they are German themselves (e.g. a nested error message).
 window.I18N_EN_PATTERNS = [

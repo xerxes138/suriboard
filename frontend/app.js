@@ -511,7 +511,7 @@
         const name = d.rrname || (d.queries && d.queries[0] && d.queries[0].rrname) || (d.answers && d.answers[0] && d.answers[0].rrname) || "";
         const answers = (d.answers || []).map((x) => x.rdata).filter(Boolean);
         if (d.grouped) Object.values(d.grouped).forEach((v) => Array.isArray(v) && v.forEach((x) => answers.push(typeof x === "string" ? x : JSON.stringify(x))));
-        return (d.type === "answer" || d.type === "response" ? "Antwort " : "Anfrage ") + name + (d.rrtype ? " (" + d.rrtype + ")" : "") +
+        return (d.type === "answer" || d.type === "response" ? T("Antwort") : T("Anfrage")) + " " + name + (d.rrtype ? " (" + d.rrtype + ")" : "") +
           (answers.length ? " → " + answers.slice(0, 6).join(", ") : "") + (d.rcode && d.rcode !== "NOERROR" ? " · " + d.rcode : "");
       }
       case "tls": {
@@ -1084,7 +1084,7 @@
               <input type="text" value=${note} maxLength="80" onInput=${(e) => setNote(e.target.value)} placeholder="z. B. Tracking im Smart-TV" /></div>
           </div>
 
-          <div class="field"><label>Vorschau für <span class="mono">${env.local_rules}</span></label>
+          <div class="field"><label>Vorschau für <span class="mono" title=${env.local_rules}>${env.local_rules.split("/").pop()}</span></label>
             ${!preview ? html`<div class="cat">…</div>` : preview.error ? html`<div class="err">${preview.error}</div>`
               : html`<pre class="json rule-text">${preview.rules.map((r) => r.text).join("\n")}</pre>`}</div>
 
@@ -1762,7 +1762,7 @@ outputs:
         <div class="rep-card-head"><span class="mono">${d.name}</span>
           ${d.lists.length ? html`<span class="rep malicious">⚠ ${d.lists.map((l) => l.name).join(", ")}</span>`
             : d.service ? html`<span class="rep known">✓ ${d.service}</span>` : html`<span class="rep unknown">auf keiner Liste</span>`}</div>
-        <div class="cat">${d.rank ? "Tranco-Rang " + fmtNum(d.rank) : "nicht in den Tranco-Top-Domains"}${d.lists.some((l) => l.via !== d.name) ? " · gelistet als " + d.lists.map((l) => l.via).join(", ") : ""}</div>
+        <div class="cat">${d.rank ? T("Tranco-Rang {n}", { n: fmtNum(d.rank) }) : T("nicht in den Tranco-Top-Domains")}${d.lists.some((l) => l.via !== d.name) ? " · " + T("gelistet als {x}", { x: d.lists.map((l) => l.via).join(", ") }) : ""}</div>
         ${res.ips.length ? html`<div style=${{ marginTop: 8 }}><div class="cat">Im Netz gesehene IPs zu dieser Domain:</div>
           ${res.ips.map((r) => html`<div key=${r.ip} class="example"><span class="mono">${r.ip}</span> <${RepBadge} r=${r} withName /></div>`)}</div>`
           : html`<div class="cat">Diese Domain wurde im Netz noch nicht gesehen.</div>`}
@@ -2163,7 +2163,7 @@ outputs:
     const s = doc.settings || {};
     return html`<div class="rep-card import-preview">
       <div class="rep-card-head">${source}</div>
-      <div class="cat">Exportiert ${doc.exported ? fmtDateTime(doc.exported) : "?"}${doc.host ? " auf " + doc.host : ""}${doc.app_version ? " · Version " + doc.app_version : ""}</div>
+      <div class="cat">Exportiert ${doc.exported ? fmtDateTime(doc.exported) : "?"}${doc.host ? " " + T("auf {x}", { x: doc.host }) : ""}${doc.app_version ? " · " + T("Version {x}", { x: doc.app_version }) : ""}</div>
       ${!res ? html`
         <div class="import-sections">${present.map((k) => html`<div key=${k}><label class="switch">
           <input type="checkbox" checked=${sel.includes(k)} onChange=${() => toggle(k)} /><span class="slider"></span>
@@ -2748,7 +2748,7 @@ outputs:
         return html`<div key=${e.id} class="live-conn">
           <div><span class="live-arrow">${arrow}</span> <b>${trunc(nodeTitle(other), 40)}</b>
             ${other && other.kind === "remote" && other.rep && !["unknown", "popular"].includes(other.rep.verdict) && html` <${RepBadge} r=${other.rep} />`}</div>
-          <div class="cat">${e.services.join(", ")}${e.dir === "in" ? " · eingehend" : ""}${e.open ? " · aktiv" : " · beendet"} · seit ${fmtTime(e.first)}${e.flows ? " · " + e.flows + " Flows, " + fmtBytes(e.bytes) : ""}</div>
+          <div class="cat">${e.services.join(", ")}${e.dir === "in" ? " · eingehend" : ""}${e.open ? " · aktiv" : " · beendet"} · seit ${fmtTime(e.first)}${e.flows ? " · " + T("{n} Flows, {b}", { n: e.flows, b: fmtBytes(e.bytes) }) : ""}</div>
           ${e.names.length > 0 && html`<div class="cat">Host: ${e.names.join(", ")}</div>`}
           ${e.queries.length > 0 && html`<div class="cat">DNS: ${e.queries.join(", ")}</div>`}
         </div>`;
